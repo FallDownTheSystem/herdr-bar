@@ -413,6 +413,7 @@ def bar_session(cmd: Sequence[str], data: Dict[str, Any]) -> Dict[str, Any]:
                 keystrokes.append(last - sent)
             session.settle(0.1)  # let the preview debounce fire before the next key
         calls = workspace.server.total_calls()
+        peak = _peak_kb(session.proc.pid)
         sent = session.send(b"\x03")
         exited = session.wait_exit()
         usage = session.rusage
@@ -421,7 +422,7 @@ def bar_session(cmd: Sequence[str], data: Dict[str, Any]) -> Dict[str, Any]:
             "keystroke_ms": [value * 1000.0 for value in keystrokes],
             "exit_ms": (exited - sent) * 1000.0,
             "cpu_ms": (usage.ru_utime + usage.ru_stime) * 1000.0 if usage else 0.0,
-            "max_rss_kb": _rss_kb(usage.ru_maxrss) if usage else 0,
+            "max_rss_kb": peak or (_rss_kb(usage.ru_maxrss) if usage else 0),
             "calls": calls,
             "bytes": len(session.output),
         }
@@ -451,13 +452,14 @@ def watcher_session(cmd: Sequence[str], seconds: float) -> Dict[str, Any]:
         after = _cpu_seconds(proc.pid)
         calls = workspace.server.total_calls()
         workspace.server.event_interval = None
+        peak = _peak_kb(proc.pid)
         (workspace.watcher_dir() / "title-watcher.stopped").touch()
         _, _, usage = os.wait4(proc.pid, 0)
         proc.returncode = 0
         cpu = (after - before) if before is not None and after is not None else None
         return {
             "cpu_ms_per_s": cpu * 1000.0 / seconds if cpu is not None else None,
-            "max_rss_kb": _rss_kb(usage.ru_maxrss),
+            "max_rss_kb": peak or _rss_kb(usage.ru_maxrss),
             "calls_per_s": calls / seconds,
         }
     finally:
@@ -468,6 +470,25 @@ def watcher_session(cmd: Sequence[str], seconds: float) -> Dict[str, Any]:
             except (OSError, ChildProcessError):
                 pass
         workspace.close()
+
+
+def _peak_kb(pid: int) -> Optional[int]:
+    """Peak resident memory since exec, from /proc (Linux), or None.
+
+    ru_maxrss from wait4 is not this: it also counts the pages the child
+    inherited between fork and exec, which is the size of this Python
+    process (tens of MB once the 2,000-row snapshots are built), not the
+    plugin's. The kernel resets VmHWM at exec, so it measures the plugin
+    alone. Sampled just before the plugin is asked to stop.
+    """
+    try:
+        with open("/proc/%d/status" % pid) as handle:
+            for line in handle:
+                if line.startswith("VmHWM:"):
+                    return int(line.split()[1])
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
 
 
 def _rss_kb(value: int) -> int:
