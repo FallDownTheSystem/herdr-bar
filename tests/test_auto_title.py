@@ -229,6 +229,19 @@ class AutoTitlesTest(unittest.TestCase):
         self.assertEqual(self.client.calls[-1][-1], "Repair OAuth")
         self.title.assert_not_called()
 
+    def test_windows_console_default_title_is_not_a_task(self):
+        agent = self.client._snapshot["agents"][0]
+        agent["agent"] = agent["agent_session"]["agent"] = "codex"
+        for title in (r"C:\Program Files\PowerShell\7\pwsh.EXE",
+                      r"Administrator: C:\WINDOWS\system32\cmd.exe",
+                      r"\\server\tools\codex.cmd"):
+            agent["terminal_title_stripped"] = title
+            self.apply()
+        self.assertEqual(self.client.calls, [])
+        agent["terminal_title_stripped"] = r"Fix C:\temp\build.cmd quoting"
+        self.apply()
+        self.assertEqual(self.client.calls[-1][-1], r"Fix C:\temp\build.cmd quoting")
+
     def test_ownership_survives_restart_and_manual_rename_relinquishes_it(self):
         with tempfile.TemporaryDirectory() as root:
             with patch.dict(os.environ, {"HERDR_PLUGIN_STATE_DIR": root}):
@@ -490,10 +503,10 @@ class NamingPersistenceTest(unittest.TestCase):
         self.assertEqual(self.client._snapshot["tabs"][0]["label"], "1")
 
     def test_busy_lock_returns_without_server_requests_or_mutation(self):
-        import fcntl
+        from herdr_bar import host
         self.titles.state_dir.mkdir(parents=True)
         with (self.titles.state_dir / "auto-titles.lock").open("a") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
+            host.lock(lock, blocking=True)
             with patch.object(self.client, "snapshot") as read:
                 self.titles.apply(self.client, self.client._snapshot)
                 read.assert_not_called()

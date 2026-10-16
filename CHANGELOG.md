@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- Run on Windows (#7). The bar draws on the Windows console, talks to Herdr
+  over the named pipe behind `HERDR_SOCKET_PATH` with the same timeouts as the
+  Unix socket, and reads running times from the kernel. Task titles and tab
+  status run in the same detached watcher; on Windows it polls every two
+  seconds instead of following an event stream.
+- Skip a Windows console's default title, the path of the program that opened
+  it, when naming a tab. Codex panes keep that title until Codex sets one.
+- Add an `open-windows` action that runs `python3 run.py --open`. Windows has
+  no `sh`, and Herdr rejects a second `open` action even with a different
+  `platforms` list. The open path imports nothing beyond the CLI call. On
+  Linux and macOS, `open` keeps its `sh -c` one-liner and its startup cost.
+
 ## 0.7.3
 
 - Add `lowercase_titles` (default `false`) to lowercase automatic Claude and

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import json
 import os
@@ -11,6 +10,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
+from . import host
 from .client import HerdrClient, HerdrError
 from .config import Config
 from .textutil import sanitize, truncate
@@ -148,6 +148,13 @@ class TranscriptReader:
         return state["title"] or state["opening"]
 
 
+# A Windows console is titled with the path of the program that opened it,
+# such as C:\Program Files\PowerShell\7\pwsh.EXE, until something sets a title.
+# That names the shell, not the task.
+_PROGRAM_PATH = re.compile(
+    r"(?:administrator: )?(?:[a-z]:\\|\\\\)[^\r\n]*\.(?:exe|com|bat|cmd)", re.IGNORECASE)
+
+
 def _agent_title(agent: Dict[str, Any], pane: Dict[str, Any]) -> str:
     title = _title(agent.get("terminal_title_stripped") or pane.get("terminal_title_stripped"))
     cwd = agent.get("cwd") or pane.get("cwd") or ""
@@ -155,7 +162,7 @@ def _agent_title(agent: Dict[str, Any], pane: Dict[str, Any]) -> str:
     if folder and title.endswith(" | " + folder):
         title = title[:-(len(folder) + 3)].strip()
     generic = ("", "codex", "claude", "claude code", folder.casefold(), cwd.casefold())
-    if title.casefold() in generic:
+    if title.casefold() in generic or _PROGRAM_PATH.fullmatch(title):
         return ""
     return title
 
@@ -287,7 +294,7 @@ class AutoTitles:
         self.state_dir.mkdir(parents=True, exist_ok=True)
         with (self.state_dir / "auto-titles.lock").open("a") as lock:
             try:
-                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                host.lock(lock)
             except BlockingIOError:
                 return snapshot
             path = self.state_dir / "auto-titles.json"
