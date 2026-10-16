@@ -296,10 +296,6 @@ impl Painter {
         self.fresh = true;
     }
 
-    pub fn screen(&self) -> Vec<Cells> {
-        self.grid.clone()
-    }
-
     /// The bytes that turn the painted screen into these rows.
     pub fn frame(&mut self, rows: &[String], width: usize, height: usize) -> String {
         let rows = &rows[..rows.len().min(height)];

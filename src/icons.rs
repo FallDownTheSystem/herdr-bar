@@ -20,10 +20,6 @@ pub fn logo(index: usize) -> char {
     char::from_u32(0xE1A0 + index as u32).unwrap()
 }
 
-pub fn logos() -> impl Iterator<Item = char> {
-    (0..VENDORS.len()).map(logo)
-}
-
 pub fn is_logo(c: char) -> bool {
     (0xE1A0..0xE1A0 + VENDORS.len() as u32).contains(&(c as u32))
 }

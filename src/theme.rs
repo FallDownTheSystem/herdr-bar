@@ -151,10 +151,6 @@ impl Theme {
         self.fg.get(role).map(|s| s.as_str()).unwrap_or("")
     }
 
-    pub fn has_role(&self, role: &str) -> bool {
-        self.fg.contains_key(role)
-    }
-
     pub fn paint(&self, role: &str, text: &str) -> String {
         self.paint_bold(role, text, false)
     }
@@ -167,9 +163,6 @@ impl Theme {
         format!("{}{}{}{}", if bold { BOLD } else { "" }, color, text, RESET)
     }
 
-    pub fn status_color(&self, status: &str) -> &str {
-        self.fg(if self.has_role(status) { status } else { "unknown" })
-    }
 }
 
 /// The secondary foreground: legible, still clearly below the title.

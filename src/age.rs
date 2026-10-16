@@ -10,7 +10,9 @@ use crate::pyjson::{self, Value};
 use crate::pystr;
 
 pub const MINUTE: i128 = 60;
+#[cfg_attr(windows, allow(dead_code))]
 pub const HOUR: i128 = 60 * MINUTE;
+#[cfg_attr(windows, allow(dead_code))]
 pub const DAY: i128 = 24 * HOUR;
 
 fn positive_int(value: &Value) -> bool {
@@ -44,6 +46,7 @@ pub fn pid_for(info: &Value) -> Option<Value> {
 }
 
 /// Read ps(1) elapsed time -- `[[dd-]hh:]mm:ss` -- as seconds.
+#[cfg_attr(windows, allow(dead_code))]
 pub fn parse_etime(text: &str) -> Option<f64> {
     let mut text = pystr::strip(text);
     if text.is_empty() {
@@ -81,7 +84,7 @@ pub fn parse_etime(text: &str) -> Option<f64> {
 pub fn elapsed_seconds(pid: &Value) -> Option<f64> {
     #[cfg(windows)]
     {
-        return crate::host::process_age(pid.as_int()?);
+        crate::host::process_age(pid.as_int()?)
     }
     #[cfg(not(windows))]
     {

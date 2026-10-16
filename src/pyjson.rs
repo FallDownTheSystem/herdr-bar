@@ -135,13 +135,6 @@ impl Value {
         }
     }
 
-    pub fn as_list(&self) -> Option<&Vec<Value>> {
-        match self {
-            Value::List(l) => Some(l),
-            _ => None,
-        }
-    }
-
     pub fn is_null(&self) -> bool {
         matches!(self, Value::Null)
     }

@@ -375,7 +375,3 @@ pub fn process_age(pid: i128) -> Option<f64> {
     Some(((value(now) - value(created)) as f64 / 1e7).max(0.0))
 }
 
-#[cfg(not(windows))]
-pub fn process_age(_pid: i128) -> Option<f64> {
-    None
-}

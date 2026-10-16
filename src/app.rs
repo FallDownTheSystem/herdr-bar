@@ -103,9 +103,7 @@ pub fn score_item<'a>(terms: &[Term], item: &'a Item, memo: &mut Memo<'a>) -> Op
         let mut best: Option<(i64, usize, &Match)> = None;
         for (index, field) in item.fields.iter().enumerate() {
             let key = (term_index, field.as_str());
-            if !memo.contains_key(&key) {
-                memo.insert(key, match_prepared(term, &item.prepared[index]));
-            }
+            memo.entry(key).or_insert_with(|| match_prepared(term, &item.prepared[index]));
         }
         for (index, field) in item.fields.iter().enumerate() {
             let Some(found) = memo.get(&(term_index, field.as_str())).and_then(|f| f.as_ref()) else { continue };
@@ -313,7 +311,7 @@ impl Bar {
                 Row { item: index, positions, field_positions: by_field },
             ));
         }
-        scored.sort_by(|a, b| a.0.cmp(&b.0));
+        scored.sort_by_key(|a| a.0);
         scored.into_iter().map(|(_, row)| row).collect()
     }
 

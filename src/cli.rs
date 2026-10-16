@@ -50,7 +50,7 @@ pub fn state_path() -> Option<PathBuf> {
 }
 
 fn fail(message: &str) -> i32 {
-    eprint!("herdr-bar: {}\n", message);
+    eprintln!("herdr-bar: {}", message);
     2
 }
 

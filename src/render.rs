@@ -19,7 +19,6 @@ pub const PROMPT: &str = "❯";
 pub const SELECTED_BAR: &str = "▌";
 pub const SCROLL_TRACK: &str = "│";
 pub const SCROLL_THUMB: &str = "┃";
-pub const DIVIDER: &str = "│";
 pub const SEPARATOR: &str = " │ ";
 
 pub fn status_word(status: &str) -> &'static str {

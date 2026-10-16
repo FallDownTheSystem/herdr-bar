@@ -15,7 +15,9 @@ use crate::opener::herdr_bin;
 use crate::pyjson::{self, Map, Value};
 use crate::pystr;
 use std::fmt;
-use std::io::{self, Read, Write};
+use std::io;
+#[cfg(unix)]
+use std::io::{Read, Write};
 use std::time::{Duration, Instant};
 
 /// What kind of failure, as the Python release told them apart by class.
@@ -360,6 +362,7 @@ fn unix_request(_path: &str, _payload: &[u8], _timeout: f64) -> io::Result<Vec<u
 /// at its interval.
 pub struct EventStream {
     pub socket_path: Option<String>,
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub timeout: f64,
     #[cfg(unix)]
     conn: Option<std::os::unix::net::UnixStream>,
@@ -370,15 +373,12 @@ pub struct EventStream {
     pending: bool,
 }
 
+#[cfg_attr(not(unix), allow(dead_code))]
 const RETRY: Duration = Duration::from_secs(2);
 
 impl EventStream {
     pub fn new(socket_path: Option<String>, timeout: f64) -> EventStream {
         EventStream { socket_path, timeout, conn: None, subscriptions: Vec::new(), retry_at: None, pending: false }
-    }
-
-    pub fn connected(&self) -> bool {
-        self.conn.is_some()
     }
 
     /// Keep exactly these subscriptions open; an error on refusal.
@@ -473,7 +473,7 @@ impl EventStream {
             let deadline = Instant::now() + Duration::from_secs_f64(timeout.max(0.0));
             loop {
                 let left = deadline.saturating_duration_since(Instant::now());
-                let ms = left.as_millis().min(i32::MAX as u128) as i32 + if left.subsec_nanos() % 1_000_000 != 0 { 1 } else { 0 };
+                let ms = left.as_millis().min(i32::MAX as u128) as i32 + if !left.subsec_nanos().is_multiple_of(1_000_000) { 1 } else { 0 };
                 let ready = unsafe { libc::poll(&mut poll, 1, ms) };
                 if ready < 0 {
                     if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {

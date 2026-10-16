@@ -70,9 +70,7 @@ fn bonuses(text: &[char]) -> Vec<i64> {
         let previous = text[index - 1];
         if is_delimiter(previous) {
             out.push(BONUS_BOUNDARY);
-        } else if pystr::is_lower(previous) && pystr::is_upper(c) {
-            out.push(BONUS_CAMEL);
-        } else if pystr::is_digit(previous) != pystr::is_digit(c) {
+        } else if (pystr::is_lower(previous) && pystr::is_upper(c)) || pystr::is_digit(previous) != pystr::is_digit(c) {
             out.push(BONUS_CAMEL);
         } else {
             out.push(0);
@@ -129,6 +127,7 @@ fn find(haystack: &[char], c: char, from: usize) -> Option<usize> {
     haystack[from..].iter().position(|&h| h == c).map(|p| p + from)
 }
 
+#[cfg(test)]
 /// Score one term against one string, or None when it does not match.
 pub fn match_text(query: &str, text: &str) -> Option<Match> {
     if query.is_empty() {

@@ -53,7 +53,7 @@ pub fn open_bar() -> i32 {
         use std::os::unix::process::CommandExt;
         // Replace this process, so nothing lingers behind the popup.
         let error = process.exec();
-        eprint!("herdr-bar: could not run herdr: {}\n", crate::host::os_error_str(&error));
+        eprintln!("herdr-bar: could not run herdr: {}", crate::host::os_error_str(&error));
         2
     }
     #[cfg(not(unix))]
@@ -62,7 +62,7 @@ pub fn open_bar() -> i32 {
         match process.status() {
             Ok(status) => status.code().unwrap_or(1),
             Err(error) => {
-                eprint!("herdr-bar: could not run herdr: {}\n", crate::host::os_error_str(&error));
+                eprintln!("herdr-bar: could not run herdr: {}", crate::host::os_error_str(&error));
                 2
             }
         }

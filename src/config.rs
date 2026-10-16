@@ -108,10 +108,6 @@ impl Config {
         }
     }
 
-    pub fn refresh_seconds(&self) -> f64 {
-        self.refresh_ms as f64 / 1000.0
-    }
-
     /// Whether the preview is showing before anyone presses ^o.
     pub fn preview_starts_on(&self) -> bool {
         !self.preview.is_false()

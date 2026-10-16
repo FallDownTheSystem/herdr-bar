@@ -1,6 +1,6 @@
 //! Follow agent task titles while preserving names supplied by the user.
 
-use crate::client::{HerdrError, Result};
+use crate::client::Result;
 use crate::config::Config;
 use crate::host;
 use crate::pyjson::{self, py_eq, Map, Value, NULL};
@@ -54,14 +54,8 @@ fn find_from(chars: &[char], from: usize, word: &str) -> Option<usize> {
 }
 
 fn starts_at(chars: &[char], at: usize, word: &str) -> bool {
-    let mut index = at;
-    for c in word.chars() {
-        if index >= chars.len() || chars[index] != c {
-            return false;
-        }
-        index += 1;
-    }
-    true
+    let needle: Vec<char> = word.chars().collect();
+    chars.get(at..at + needle.len()) == Some(&needle[..])
 }
 
 /// `<command-name>\s*/?([^<\s]+)\s*</command-name>`: the command's group.
@@ -806,22 +800,6 @@ impl AutoTitles {
         Ok(snapshot)
     }
 }
-
-/// Exposed for parity tests.
-pub fn program_path(text: &str) -> bool {
-    is_program_path(text)
-}
-
-pub fn agent_title_for(agent: &Value, pane: &Value) -> String {
-    agent_title(agent, pane)
-}
-
-pub fn default_name(name: &Value, kind: &Value, cwd: &str) -> bool {
-    default_agent_name(name, kind, cwd)
-}
-
-#[allow(dead_code)]
-fn _unused(_: HerdrError) {}
 
 #[cfg(test)]
 mod tests {

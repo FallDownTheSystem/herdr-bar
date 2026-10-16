@@ -54,8 +54,7 @@ fn entry_point(root: &Path) -> Vec<OsString> {
             return vec![candidate.into_os_string()];
         }
     }
-    let python = if cfg!(windows) { "python3" } else { "python3" };
-    vec![OsString::from(python), root.join("run.py").into_os_string()]
+    vec![OsString::from("python3"), root.join("run.py").into_os_string()]
 }
 
 /// Best-effort launch; unavailable state storage must never break the popup.
