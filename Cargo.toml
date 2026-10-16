@@ -10,6 +10,10 @@ publish = false
 name = "herdr-bar"
 path = "src/main.rs"
 
+[features]
+# The differential probe scripts/fuzz_parity.py drives.
+probe = []
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 

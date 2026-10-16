@@ -427,7 +427,7 @@ fn first_truthy<'a>(values: &[&'a Value]) -> &'a Value {
     values.iter().find(|v| v.truthy()).copied().unwrap_or(&NULL)
 }
 
-fn agent_title(agent: &Value, pane: &Value) -> String {
+pub(crate) fn agent_title(agent: &Value, pane: &Value) -> String {
     let mut title = title_of(first_truthy(&[agent.get("terminal_title_stripped"), pane.get("terminal_title_stripped")]));
     let cwd = str_or_empty(first_truthy(&[agent.get("cwd"), pane.get("cwd")]));
     let folder = pyos::path_name(cwd);
@@ -475,7 +475,7 @@ fn strip_dash_underscore(text: &str) -> &str {
 /// `herdr agent start` requires a name, so launchers such as
 /// herdr-newtab-plus fill it from the folder (`herdr-bar`, then
 /// `herdr-bar-2`...). That is a default, not a name somebody chose.
-fn default_agent_name(name: &Value, kind: &Value, cwd: &str) -> bool {
+pub(crate) fn default_agent_name(name: &Value, kind: &Value, cwd: &str) -> bool {
     let Some(name) = name.as_str().filter(|n| !n.is_empty()) else { return false };
     let trimmed = cwd.trim_end_matches('/');
     let mut base = strip_dash_underscore(&name_strip(&pystr::lower(&pyos::path_name(trimmed)))).to_string();

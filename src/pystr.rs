@@ -286,7 +286,8 @@ pub fn splitlines(text: &str) -> Vec<&str> {
 }
 
 /// `int(text)` for a string: optional whitespace and sign, Unicode decimal
-/// digits, single underscores between digits. None where Python raises.
+/// digits, single underscores between digits. None where Python raises;
+/// saturated at the i128 bounds where Python would keep going.
 pub fn parse_int(text: &str) -> Option<i128> {
     let text = strip(text);
     let mut chars = text.chars().peekable();
@@ -311,9 +312,12 @@ pub fn parse_int(text: &str) -> Option<i128> {
         let digit = decimal_value(c)?;
         previous_underscore = false;
         digits += 1;
-        value = value.checked_mul(10)?.checked_add(digit as i128)?;
+        // Past i128 the value saturates: every caller compares it against
+        // small bounds, which a saturated value fails the way Python's would.
+        value = value.saturating_mul(10).saturating_add(digit as i128);
     }
-    if digits == 0 || previous_underscore {
+    // Python refuses to convert more than 4300 digits.
+    if digits == 0 || previous_underscore || digits > 4300 {
         return None;
     }
     Some(if negative { -value } else { value })

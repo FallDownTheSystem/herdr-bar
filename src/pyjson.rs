@@ -622,7 +622,15 @@ pub fn float_repr(value: f64) -> String {
         return if value > 0.0 { "inf".into() } else { "-inf".into() };
     }
     let negative = value.is_sign_negative();
-    let scientific = format!("{:e}", value.abs());
+    let mut scientific = format!("{:e}", value.abs());
+    // Rust's shortest digits break an exact tie upwards, CPython's to even:
+    // 2215847513417901.25 is ...901.3 to one and ...901.2 to the other. The
+    // correctly rounded string of the same length settles it.
+    let precision = scientific.split_once('e').map_or(0, |(m, _)| m.len().saturating_sub(2));
+    let even = format!("{:.*e}", precision, value.abs());
+    if even != scientific && even.parse::<f64>().ok() == Some(value.abs()) {
+        scientific = even;
+    }
     let (mantissa, exponent) = scientific.split_once('e').unwrap_or((&scientific, "0"));
     let exponent: i32 = exponent.parse().unwrap_or(0);
     let digits: String = mantissa.chars().filter(|c| *c != '.').collect();
@@ -739,6 +747,8 @@ mod tests {
         assert_eq!(float_repr(-0.0), "-0.0");
         assert_eq!(float_repr(123456789012345680.0), "1.2345678901234568e+17");
         assert_eq!(float_repr(1e15), "1000000000000000.0");
+        // An exact tie in the last digit rounds to even, as CPython does.
+        assert_eq!(float_repr(2215847513417901.25), "2215847513417901.2");
     }
 
     #[test]
