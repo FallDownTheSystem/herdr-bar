@@ -65,3 +65,45 @@ jobs:
       # Pinned: an unpinned linter can fail a green tree on someone else's release.
       - run: pip install ruff==0.16.0
       - run: ruff check .
+
+  rust:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      # No `cargo fmt --check` yet: the port is not rustfmt-clean, and
+      # reformatting it is a separate change from wiring up CI.
+      - name: Clippy
+        run: cargo clippy --release -- -D warnings
+      - name: Tests
+        run: cargo test --release
+      - name: Build
+        run: cargo build --release
+
+  # The Rust build has to be a drop-in replacement for the Python one: the
+  # parity harness drives both on a pty against a fake Herdr and fails on any
+  # difference, and the fuzzer checks the pure functions input by input.
+  parity:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --release
+      - name: Python vs Rust transcripts
+        run: python3 scripts/parity.py --rust target/release/herdr-bar
+      - name: Build probe
+        run: cargo build --release --features probe
+      - name: Differential fuzz
+        run: python3 scripts/fuzz_parity.py --probe target/release/herdr-bar --count 2000
