@@ -36,8 +36,9 @@ quick switcher, for the terminal.
   before you leap.
 - **closes tabs** — `⌦` on a row closes its tab once you confirm, so the
   session you are looking at is the session you can tidy.
-- **no dependencies** — Python 3 standard library only. No build step, no
-  runtime to install. A small background watcher runs when tab updates are enabled.
+- **one small native binary** — written in Rust, no runtime to install. Herdr
+  downloads the prebuilt binary for your platform when it installs the plugin.
+  A small background watcher runs when tab updates are enabled.
 
 ## Install
 
@@ -58,17 +59,16 @@ description = "command bar"
 
 Reload with `herdr server reload-config`, then press `ctrl+b k`.
 
-Requires herdr 0.9.0+ (startup hooks and agent session metadata), Python 3.9+
-on PATH as `python3`, and macOS, Linux or Windows. Herdr refuses to install the
-plugin on anything older, so there is nothing to get wrong.
+Requires herdr 0.9.0+ (startup hooks and agent session metadata) on macOS,
+Linux or Windows, x86_64 or ARM. Herdr refuses to install the plugin on anything
+older, so there is nothing to get wrong. Installing runs the plugin's build
+step, which downloads the release binary for your platform and checks it
+against the release's `SHA256SUMS`; if that fails, it builds from source with
+`cargo` instead. Set `HERDR_BAR_BUILD=source` to always build from source.
 
 **Windows.** Bind `command = "herdr-bar.open-windows"` instead of
 `herdr-bar.open`: `open` is a shell one-liner, and Windows has no `sh`.
-Herdr starts plugin commands without a shell, so `python3` itself
-has to start Python 3.9 or later. The Microsoft Store build of Python provides
-`python3`. The python.org installer provides only `python` and `py`, and then
-`python3` is a Windows shortcut that prints "Python was not found". Check with
-`python3 --version` in a new terminal. Everything works on Windows, with one
+The build step runs in Windows PowerShell. Everything works on Windows, with one
 difference: tab status glyphs follow the watcher's two-second poll instead of
 an event stream. Tested on Windows 11 with herdr 0.9.3 in Windows Terminal.
 
@@ -420,11 +420,14 @@ in the server's state subdirectory. Tab titles themselves are stored by Herdr.
 ```bash
 git clone https://github.com/jeffarese/herdr-bar
 cd herdr-bar
-herdr plugin link .
+sh scripts/install.sh       # or: HERDR_BAR_BUILD=source sh scripts/install.sh
+herdr plugin link .         # link never runs the build step, so build first
 
+cargo test --release                            # the Rust unit tests
+python3 scripts/parity.py --rust target/release/herdr-bar   # Rust vs Python, end to end
 PYTHONPATH=src python3 -m unittest discover -s tests -t .   # no deps
-python3 run.py --doctor                         # environment diagnostics
-python3 run.py --list                           # the rows, as JSON
+bin/herdr-bar --doctor                          # environment diagnostics
+bin/herdr-bar --list                            # the rows, as JSON
 python3 scripts/demo.py                         # run against fixture data
 python3 scripts/demo.py --frame --plain         # print one static frame
 ruff check .                                    # lint, if you have it
