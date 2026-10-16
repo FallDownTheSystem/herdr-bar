@@ -228,6 +228,9 @@ pub fn py_eq(a: &Value, b: &Value) -> bool {
 pub struct ParseError;
 
 const MAX_DEPTH: usize = 900;
+/// Arrays at least this big, this near the top, are parsed in parallel.
+const SPLIT_MIN_BYTES: usize = 128 * 1024;
+const SPLIT_MAX_DEPTH: usize = 4;
 
 struct Parser<'a> {
     chars: &'a [u8],
@@ -430,6 +433,12 @@ impl<'a> Parser<'a> {
 
     fn array(&mut self) -> Result<Value, ParseError> {
         self.enter()?;
+        if self.depth <= SPLIT_MAX_DEPTH && self.chars.len() - self.at >= SPLIT_MIN_BYTES {
+            if let Some(items) = self.split_array() {
+                self.depth -= 1;
+                return Ok(Value::List(items?));
+            }
+        }
         self.at += 1;
         let mut items = Vec::new();
         self.skip_ws();
@@ -452,6 +461,80 @@ impl<'a> Parser<'a> {
                 _ => return Err(ParseError),
             }
         }
+    }
+
+    /// A big array's elements, parsed in parallel; None to parse it in order.
+    ///
+    /// One quick pass finds where each element ends -- the commas outside
+    /// strings at the array's own level -- and the elements are then parsed
+    /// by `value` on a few threads, each one exactly as the sequential loop
+    /// would, starting at the same depth. If the sequential parse succeeds
+    /// the boundaries are the same ones it would find, and if any element
+    /// fails to parse (or does not fill its slot) so would the sequential
+    /// one, so the result is the same either way. Arrays that are not big,
+    /// or that the pass cannot close, go the ordinary way.
+    fn split_array(&mut self) -> Option<Result<Vec<Value>, ParseError>> {
+        let open = self.at;
+        let mut level = 0usize;
+        let mut in_string = false;
+        let mut escaped = false;
+        let mut cuts: Vec<usize> = vec![open];
+        let mut close = None;
+        for (index, &b) in self.chars[open..].iter().enumerate() {
+            if in_string {
+                if escaped {
+                    escaped = false;
+                } else if b == b'\\' {
+                    escaped = true;
+                } else if b == b'"' {
+                    in_string = false;
+                }
+                continue;
+            }
+            match b {
+                b'"' => in_string = true,
+                b'[' | b'{' => level += 1,
+                b']' | b'}' => {
+                    level -= 1;
+                    if level == 0 {
+                        close = Some(open + index);
+                        break;
+                    }
+                }
+                b',' if level == 1 => cuts.push(open + index),
+                _ => {}
+            }
+        }
+        let close = close?;
+        if close - open < SPLIT_MIN_BYTES || cuts.len() < crate::par::MIN_PARALLEL {
+            return None;
+        }
+        cuts.push(close);
+        let slots: Vec<(usize, usize)> = cuts.windows(2).map(|pair| (pair[0] + 1, pair[1])).collect();
+        let (chars, depth) = (self.chars, self.depth);
+        let parsed = crate::par::map_chunks(&slots, |slots| {
+            let mut out = Vec::with_capacity(slots.len());
+            for &(start, end) in slots {
+                let mut parser = Parser { chars: &chars[..end], at: start, depth };
+                parser.skip_ws();
+                let value = parser.value().and_then(|value| {
+                    parser.skip_ws();
+                    if parser.at == end {
+                        Ok(value)
+                    } else {
+                        Err(ParseError)
+                    }
+                });
+                let failed = value.is_err();
+                out.push(value);
+                if failed {
+                    break;
+                }
+            }
+            out
+        });
+        self.at = close + 1;
+        Some(parsed.into_iter().collect())
     }
 
     fn object(&mut self) -> Result<Value, ParseError> {
@@ -747,6 +830,46 @@ pub fn str_repr(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One element per index, with every kind of value and the characters
+    /// a boundary scan could trip on inside strings.
+    fn element(index: usize) -> String {
+        format!(
+            r#"{{"id": "w1:p{i}", "n": {i}, "f": {i}.5e-1, "t": true, "z": null, "s": "a,b]c}}d\"e\\", "u": "é😀", "l": [1, [2, {{"k": "]"}}], -3], "d": {{}}, "e": []}}"#,
+            i = index
+        )
+    }
+
+    fn big_array(count: usize) -> String {
+        let items: Vec<String> = (0..count).map(element).collect();
+        format!("[\n {} \n]", items.join(" ,\n "))
+    }
+
+    #[test]
+    fn split_arrays_parse_as_in_order() {
+        let text = format!(r#"{{"result": {{"panes": {}, "x": 1}}}}"#, big_array(3000));
+        assert!(text.len() > SPLIT_MIN_BYTES);
+        let parsed = loads(&text).unwrap();
+        let panes = parsed.get("result").get("panes").list_or_empty();
+        assert_eq!(panes.len(), 3000);
+        for (index, pane) in panes.iter().enumerate() {
+            assert_eq!(dumps(pane, false), dumps(&loads(&element(index)).unwrap(), false));
+        }
+        assert_eq!(parsed.get("result").get("x").as_int(), Some(1));
+        // Anything the sequential parser refuses is still refused.
+        let good = big_array(3000);
+        let broken = [
+            good.replacen("\"n\": 1500,", "\"n\": 1500,,", 1),
+            good.replacen("\"t\": true", "\"t\": tru", 1),
+            good.replacen("} ,\n {", "}  {", 1),
+            format!("{},]", &good[..good.len() - 1]),
+            good[..good.len() - 2].to_string(),
+            good.replacen("\"e\": []}", "\"e\": []} 7", 1),
+        ];
+        for text in broken {
+            assert!(loads(&text).is_err());
+        }
+    }
 
     #[test]
     fn floats() {

@@ -264,7 +264,10 @@ impl Bar {
 
     pub fn refresh(&mut self, force: bool) {
         match self.client.snapshot_since(&mut self.snapshot_answer) {
-            Ok(Some(snapshot)) => self.apply(&snapshot, force),
+            Ok(Some(snapshot)) => {
+                self.apply(&snapshot, force);
+                crate::par::drop_aside(snapshot, self.pool.len() >= crate::par::MIN_PARALLEL);
+            }
             Ok(None) => self.reapply(force),
             Err(error) => {
                 self.flash(error.message);
@@ -300,7 +303,8 @@ impl Bar {
             }
         }
         self.item_count = pool.item_count;
-        self.pool = pool.items;
+        let old = std::mem::replace(&mut self.pool, pool.items);
+        crate::par::drop_aside(old, self.pool.len() >= crate::par::MIN_PARALLEL);
         self.last_refresh = monotonic();
         self.rebuild(if force { None } else { keep });
     }

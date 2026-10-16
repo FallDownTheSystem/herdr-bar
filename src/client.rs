@@ -405,23 +405,30 @@ fn unix_request(path: &str, payload: &[u8], timeout: f64) -> io::Result<Vec<u8>>
     conn.set_read_timeout(limit)?;
     conn.set_write_timeout(limit)?;
     conn.write_all(payload)?;
+    // Read straight into the answer, in reads that grow with it: a big
+    // snapshot arrives in a handful of reads instead of one per 64 KiB, each
+    // of which would also have woken the sender.
     let mut buffered: Vec<u8> = Vec::new();
-    let mut chunk = vec![0u8; 65536];
     let mut scanned = 0;
     loop {
         if buffered[scanned..].contains(&b'\n') {
             break;
         }
         scanned = buffered.len();
-        let count = match conn.read(&mut chunk) {
+        let room = scanned.clamp(65536, 4 << 20);
+        buffered.resize(scanned + room, 0);
+        let count = match conn.read(&mut buffered[scanned..]) {
             Ok(count) => count,
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {
+                buffered.truncate(scanned);
+                continue;
+            }
             Err(error) => return Err(error),
         };
+        buffered.truncate(scanned + count);
         if count == 0 {
             break;
         }
-        buffered.extend_from_slice(&chunk[..count]);
     }
     let end = buffered.iter().position(|&b| b == b'\n').unwrap_or(buffered.len());
     buffered.truncate(end);

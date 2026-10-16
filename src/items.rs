@@ -74,22 +74,23 @@ impl Item {
         let tab_number = init.tab_number.as_ref().and_then(|v| v.as_int());
         // Searchable fields, title first. Each query term has to match one
         // field on its own.
-        let mut candidates: Vec<String> =
-            vec![init.title.clone(), init.detail.clone(), init.subtitle.clone(), init.workspace_label.clone()];
-        candidates.extend(init.extra_terms.iter().filter(|t| !t.is_empty()).cloned());
-        candidates.push(init.agent.clone().unwrap_or_default());
-        candidates.push(init.agent_name.clone().unwrap_or_default());
-        candidates.push(init.status.clone());
-        if let Some(number) = tab_number {
-            candidates.push(format!("#{}", number));
-        }
+        let number = tab_number.map(|number| format!("#{}", number));
+        let mut candidates: Vec<&str> = vec![&init.title, &init.detail, &init.subtitle, &init.workspace_label];
+        candidates.extend(init.extra_terms.iter().map(String::as_str));
+        candidates.push(init.agent.as_deref().unwrap_or(""));
+        candidates.push(init.agent_name.as_deref().unwrap_or(""));
+        candidates.push(&init.status);
+        candidates.extend(number.as_deref());
         let mut seen: Vec<String> = Vec::new();
         let mut fields: Vec<String> = Vec::new();
         for candidate in candidates {
-            let key_text = pystr::lower(&candidate);
-            if !candidate.is_empty() && !seen.contains(&key_text) {
+            if candidate.is_empty() {
+                continue;
+            }
+            let key_text = pystr::lower(candidate);
+            if !seen.contains(&key_text) {
                 seen.push(key_text);
-                fields.push(candidate);
+                fields.push(candidate.to_string());
             }
         }
         let detail_field = if !init.detail.is_empty() {

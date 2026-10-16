@@ -225,14 +225,17 @@ pub fn main(args: Vec<String>) -> i32 {
         icons::prefetch();
     }
     let fetch_config = config.clone();
-    let fetch = std::thread::spawn(move || {
+    // The answer comes back over a channel so the thread can go on to free
+    // the parsed snapshot while the bar draws.
+    let (fetched, fetch) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
         let mut client = client;
         let mut answer = Vec::new();
         // Nothing to compare against yet, so this always reads a snapshot.
-        let pool = client
-            .snapshot_since(&mut answer)
-            .map(|snapshot| Pool::build(&snapshot.unwrap_or(Value::Null), &fetch_config));
-        (client, pool, answer)
+        let snapshot = client.snapshot_since(&mut answer).map(|snapshot| snapshot.unwrap_or(Value::Null));
+        let pool = snapshot.as_ref().map(|snapshot| Pool::build(snapshot, &fetch_config)).map_err(|error| error.clone());
+        let _ = fetched.send((client, pool, answer));
+        drop(snapshot);
     });
 
     let mut recents = Recents::new(state_path());
@@ -250,7 +253,7 @@ pub fn main(args: Vec<String>) -> i32 {
 
     title_watcher::start(false);
     let mouse = config.mouse;
-    let (client, pool, answer) = fetch.join().unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+    let (client, pool, answer) = fetch.recv().expect("the snapshot thread panicked");
     // Never dropped: the process ends right after, and freeing thousands of
     // rows one by one would only delay the exit (Bar owns nothing to flush).
     let mut bar = std::mem::ManuallyDrop::new(Bar::new(client, config, Recents::new(None), theme));
