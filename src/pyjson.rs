@@ -356,6 +356,17 @@ impl<'a> Parser<'a> {
     }
 
     fn string(&mut self) -> Result<String, ParseError> {
+        // Most strings have no escapes: one exact allocation, no copying twice.
+        let start = self.at;
+        let mut end = start;
+        while end < self.chars.len() && !matches!(self.chars[end], b'"' | b'\\' | 0..=0x1f) {
+            end += 1;
+        }
+        if self.chars.get(end) == Some(&b'"') {
+            let text = std::str::from_utf8(&self.chars[start..end]).map_err(|_| ParseError)?;
+            self.at = end + 1;
+            return Ok(text.to_string());
+        }
         let mut out = String::new();
         loop {
             let start = self.at;

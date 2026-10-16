@@ -7,6 +7,7 @@
 //! both. Positions are code point indices, as the Python release reported them.
 
 use crate::pystr;
+use std::cell::RefCell;
 
 pub const SCORE_MATCH: i64 = 16;
 pub const BONUS_BOUNDARY: i64 = 16;
@@ -25,7 +26,11 @@ pub struct Match {
 }
 
 fn is_delimiter(c: char) -> bool {
-    " \t/\\-_.:,;|()[]{}<>@#'\"~+*=&%!?".contains(c)
+    matches!(
+        c,
+        ' ' | '\t' | '/' | '\\' | '-' | '_' | '.' | ':' | ',' | ';' | '|' | '(' | ')' | '[' | ']' | '{' | '}' | '<'
+            | '>' | '@' | '#' | '\'' | '"' | '~' | '+' | '*' | '=' | '&' | '%' | '!' | '?'
+    )
 }
 
 /// Split a raw query into AND-ed terms, keeping quoted phrases together.
@@ -60,18 +65,20 @@ pub fn split_query(query: &str) -> Vec<String> {
     terms
 }
 
-fn bonuses(text: &[char]) -> Vec<i64> {
+fn bonuses(text: &[char]) -> Vec<u8> {
+    const BOUNDARY: u8 = BONUS_BOUNDARY as u8;
+    const CAMEL: u8 = BONUS_CAMEL as u8;
     let mut out = Vec::with_capacity(text.len());
     for (index, &c) in text.iter().enumerate() {
         if index == 0 {
-            out.push(BONUS_BOUNDARY);
+            out.push(BOUNDARY);
             continue;
         }
         let previous = text[index - 1];
         if is_delimiter(previous) {
-            out.push(BONUS_BOUNDARY);
+            out.push(BOUNDARY);
         } else if (pystr::is_lower(previous) && pystr::is_upper(c)) || pystr::is_digit(previous) != pystr::is_digit(c) {
-            out.push(BONUS_CAMEL);
+            out.push(CAMEL);
         } else {
             out.push(0);
         }
@@ -85,23 +92,45 @@ fn bonuses(text: &[char]) -> Vec<i64> {
 #[derive(Clone, Debug)]
 pub struct Prepared {
     pub chars: Vec<char>,
-    pub folded: Vec<char>,
-    pub bonus: Vec<i64>,
+    /// The folded characters, or empty when folding changes nothing (most
+    /// fields): `haystack` then answers with `chars`.
+    folded: Vec<char>,
+    bonus: Vec<u8>,
 }
 
 impl Prepared {
     pub fn new(text: &str) -> Prepared {
         let chars: Vec<char> = text.chars().collect();
-        let lowered = pystr::lower(text);
-        let mut folded: Vec<char> = lowered.chars().collect();
-        if folded.len() != chars.len() {
-            // A handful of characters grow when they fold -- "İ" becomes an i
-            // and a combining dot. Fold those one at a time, keeping the
-            // leading one, so positions stay in step with the text.
-            folded = chars.iter().map(|&c| pystr::lower_char(c).chars().next().unwrap_or(c)).collect();
+        let mut folded: Vec<char> = if text.is_ascii() {
+            if text.bytes().any(|b| b.is_ascii_uppercase()) {
+                chars.iter().map(|c| c.to_ascii_lowercase()).collect()
+            } else {
+                Vec::new()
+            }
+        } else {
+            let lowered = pystr::lower(text);
+            let mut folded: Vec<char> = lowered.chars().collect();
+            if folded.len() != chars.len() {
+                // A handful of characters grow when they fold -- "İ" becomes an i
+                // and a combining dot. Fold those one at a time, keeping the
+                // leading one, so positions stay in step with the text.
+                folded = chars.iter().map(|&c| pystr::lower_char(c).chars().next().unwrap_or(c)).collect();
+            }
+            folded
+        };
+        if folded == chars {
+            folded = Vec::new();
         }
         let bonus = bonuses(&chars);
         Prepared { chars, folded, bonus }
+    }
+
+    fn haystack(&self, fold: bool) -> &[char] {
+        if fold && !self.folded.is_empty() {
+            &self.folded
+        } else {
+            &self.chars
+        }
     }
 }
 
@@ -147,8 +176,8 @@ pub fn match_prepared(term: &Term, field: &Prepared) -> Option<Match> {
     if field.chars.is_empty() {
         return None;
     }
-    let haystack: &[char] = if term.fold { &field.folded } else { &field.chars };
-    let bonus = &field.bonus;
+    let haystack = field.haystack(term.fold);
+    let bonus = |index: usize| field.bonus[index] as i64;
 
     // Cheap rejection before the DP: every query character must appear in order.
     let mut cursor = 0;
@@ -161,81 +190,91 @@ pub fn match_prepared(term: &Term, field: &Prepared) -> Option<Match> {
     let low = find(haystack, needle[0], 0)?;
     let high = haystack.iter().rposition(|&h| h == needle[m - 1])?;
 
-    let mut scores: Vec<Vec<i64>> = Vec::with_capacity(m);
-    let mut parents: Vec<Vec<isize>> = Vec::with_capacity(m);
-    let mut row = vec![NEG; n];
-    let ceiling = high as isize - m as isize + 1;
-    let mut at = Some(low);
-    while let Some(a) = at {
-        if (a as isize) > ceiling {
-            break;
-        }
-        row[a] = SCORE_MATCH + bonus[a] * BONUS_FIRST_CHAR_MULTIPLIER;
-        at = find(haystack, needle[0], a + 1);
-    }
-    scores.push(row);
-    parents.push(vec![-1; n]);
+    // One score row and one parent row per needle character, laid end to end
+    // in scratch buffers kept between calls: scoring a list is thousands of
+    // these, and allocating 2m rows each time was most of the cost.
+    SCRATCH.with(|scratch| {
+        let mut scratch = scratch.borrow_mut();
+        let (scores, parents) = &mut *scratch;
+        scores.clear();
+        scores.resize(m * n, NEG);
+        parents.clear();
+        parents.resize(m * n, -1);
 
-    for j in 1..m {
-        let qchar = needle[j];
-        let previous = &scores[j - 1];
-        let mut row = vec![NEG; n];
-        let mut back = vec![-1isize; n];
-        let ceiling = high as isize - m as isize + 1 + j as isize;
-        let mut carry = NEG;
-        let mut carry_from: isize = -1;
-        let mut carry_gap = 0;
-        let mut landed = false;
-        let mut i = low as isize + 1;
-        while i <= ceiling {
-            let iu = i as usize;
-            if carry > NEG {
-                carry += if carry_gap == 0 { PENALTY_GAP_START } else { PENALTY_GAP_EXTENSION };
-                carry_gap += 1;
+        let ceiling = high as isize - m as isize + 1;
+        let mut at = Some(low);
+        while let Some(a) = at {
+            if (a as isize) > ceiling {
+                break;
             }
-            let adjacent = previous[iu - 1];
-            if adjacent > NEG && adjacent >= carry {
-                carry = adjacent;
-                carry_from = i - 1;
-                carry_gap = 0;
-            }
-            if carry == NEG || haystack[iu] != qchar {
-                i += 1;
-                continue;
-            }
-            let mut gained = bonus[iu];
-            if carry_gap == 0 && gained < BONUS_CONSECUTIVE {
-                gained = BONUS_CONSECUTIVE;
-            }
-            row[iu] = carry + SCORE_MATCH + gained;
-            back[iu] = carry_from;
-            landed = true;
-            i += 1;
+            scores[a] = SCORE_MATCH + bonus(a) * BONUS_FIRST_CHAR_MULTIPLIER;
+            at = find(haystack, needle[0], a + 1);
         }
-        if !landed {
+
+        for j in 1..m {
+            let qchar = needle[j];
+            let (done, rest) = scores.split_at_mut(j * n);
+            let previous = &done[(j - 1) * n..];
+            let row = &mut rest[..n];
+            let back = &mut parents[j * n..(j + 1) * n];
+            let ceiling = high as isize - m as isize + 1 + j as isize;
+            let mut carry = NEG;
+            let mut carry_from: isize = -1;
+            let mut carry_gap = 0;
+            let mut landed = false;
+            let mut i = low as isize + 1;
+            while i <= ceiling {
+                let iu = i as usize;
+                if carry > NEG {
+                    carry += if carry_gap == 0 { PENALTY_GAP_START } else { PENALTY_GAP_EXTENSION };
+                    carry_gap += 1;
+                }
+                let adjacent = previous[iu - 1];
+                if adjacent > NEG && adjacent >= carry {
+                    carry = adjacent;
+                    carry_from = i - 1;
+                    carry_gap = 0;
+                }
+                if carry == NEG || haystack[iu] != qchar {
+                    i += 1;
+                    continue;
+                }
+                let mut gained = bonus(iu);
+                if carry_gap == 0 && gained < BONUS_CONSECUTIVE {
+                    gained = BONUS_CONSECUTIVE;
+                }
+                row[iu] = carry + SCORE_MATCH + gained;
+                back[iu] = carry_from;
+                landed = true;
+                i += 1;
+            }
+            if !landed {
+                return None;
+            }
+        }
+
+        let last = &scores[(m - 1) * n..];
+        let best = *last.iter().max()?;
+        if best == NEG {
             return None;
         }
-        scores.push(row);
-        parents.push(back);
-    }
-
-    let last = &scores[m - 1];
-    let best = *last.iter().max()?;
-    if best == NEG {
-        return None;
-    }
-    let best_index = last.iter().position(|&s| s == best)?;
-    let mut positions = Vec::with_capacity(m);
-    let mut index = best_index as isize;
-    for j in (0..m).rev() {
-        positions.push(index as usize);
-        index = parents[j][index as usize];
-        if index < 0 {
-            break;
+        let best_index = last.iter().position(|&s| s == best)?;
+        let mut positions = Vec::with_capacity(m);
+        let mut index = best_index as isize;
+        for j in (0..m).rev() {
+            positions.push(index as usize);
+            index = parents[j * n + index as usize];
+            if index < 0 {
+                break;
+            }
         }
-    }
-    positions.reverse();
-    Some(Match { score: last[best_index], positions })
+        positions.reverse();
+        Some(Match { score: last[best_index], positions })
+    })
+}
+
+thread_local! {
+    static SCRATCH: RefCell<(Vec<i64>, Vec<isize>)> = const { RefCell::new((Vec::new(), Vec::new())) };
 }
 
 #[cfg(test)]

@@ -135,6 +135,12 @@ impl HerdrClient {
     }
 
     fn socket_call(&self, method: &str, params: &Value) -> std::result::Result<Value, Transport> {
+        let line = self.socket_line(method, params)?;
+        HerdrClient::parse_line(&line)
+    }
+
+    /// One request over the socket: the raw response line, unparsed.
+    fn socket_line(&self, method: &str, params: &Value) -> std::result::Result<Vec<u8>, Transport> {
         let request = dict(&[("id", Value::str("bar")), ("method", Value::str(method)), ("params", params.clone())]);
         let mut payload = pyjson::dumps(&request, false).into_bytes();
         payload.push(b'\n');
@@ -144,10 +150,14 @@ impl HerdrClient {
         } else {
             unix_request(path, &payload, self.timeout).map_err(Transport::Os)?
         };
+        Ok(line)
+    }
+
+    fn parse_line(line: &[u8]) -> std::result::Result<Value, Transport> {
         if line.is_empty() {
             return Err(Transport::Herdr(HerdrError::new("herdr closed the connection without a response")));
         }
-        let text = String::from_utf8_lossy(&line);
+        let text = String::from_utf8_lossy(line);
         pyjson::loads(&text).map_err(|_| Transport::Value)
     }
 
@@ -227,11 +237,50 @@ impl HerdrClient {
     // -- operations ---------------------------------------------------------
 
     pub fn snapshot(&mut self) -> Result<Value> {
-        let mut result = self.call("session.snapshot", dict(&[]), &["api", "snapshot"])?;
+        let result = self.call("session.snapshot", dict(&[]), &["api", "snapshot"])?;
+        HerdrClient::snapshot_of(result)
+    }
+
+    fn snapshot_of(mut result: Map) -> Result<Value> {
         match result.remove("snapshot") {
             Some(snapshot @ Value::Dict(_)) => Ok(snapshot),
             _ => Err(HerdrError::new("session snapshot missing from response")),
         }
+    }
+
+    /// `snapshot`, or `Ok(None)` when Herdr's answer is byte for byte the
+    /// one that produced the last snapshot this returned.
+    ///
+    /// `previous` holds that answer. Same bytes parse to the same snapshot,
+    /// so a caller that already built everything from it can skip the work;
+    /// a periodic refresh of an idle session is then one round trip. Only
+    /// the socket answers are remembered; the CLI path always reads anew.
+    pub fn snapshot_since(&mut self, previous: &mut Vec<u8>) -> Result<Option<Value>> {
+        if !self.socket_only && self.socket_ok {
+            let parsed = self.socket_line("session.snapshot", &dict(&[])).and_then(|line| {
+                if !line.is_empty() && line == *previous {
+                    return Ok(None);
+                }
+                HerdrClient::parse_line(&line).map(|response| Some((line, response)))
+            });
+            match parsed {
+                Ok(None) => return Ok(None),
+                Ok(Some((line, response))) => {
+                    previous.clear();
+                    let snapshot = HerdrClient::unwrap(response).and_then(HerdrClient::snapshot_of)?;
+                    *previous = line;
+                    return Ok(Some(snapshot));
+                }
+                Err(Transport::Herdr(error)) => {
+                    previous.clear();
+                    return Err(error);
+                }
+                // As in `call`: stop trusting the socket and use the CLI.
+                Err(_) => self.socket_ok = false,
+            }
+        }
+        previous.clear();
+        self.snapshot().map(Some)
     }
 
     pub fn read_pane(&mut self, pane_id: &str, lines: i64, source: &str) -> Result<String> {

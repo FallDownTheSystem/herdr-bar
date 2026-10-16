@@ -10,7 +10,7 @@ use crate::pyjson::{self, Value};
 use crate::pyos;
 use crate::pystr;
 use crate::tab_status;
-use std::collections::HashMap;
+use crate::fxhash::FxHashMap;
 
 pub const KIND_AGENT: &str = "agent";
 pub const KIND_PANE: &str = "pane";
@@ -150,6 +150,9 @@ pub fn clean_str(text: &str) -> String {
     if text.is_empty() {
         return String::new();
     }
+    if !text.bytes().any(|b| b < b' ' && b != b'\t') {
+        return text.to_string(); // nothing to drop, and already stripped
+    }
     let kept: String = text.chars().filter(|&c| c >= ' ' || c == '\t').collect();
     pystr::strip(&kept).to_string()
 }
@@ -238,13 +241,13 @@ fn tab_number_of(record: &Value) -> Option<Value> {
 /// scan, over the non-string keys alone: the answer is the same either way.
 struct Lookup<'a, T> {
     entries: Vec<(&'a Value, T)>,
-    strings: HashMap<&'a str, usize>,
+    strings: FxHashMap<&'a str, usize>,
     others: Vec<usize>,
 }
 
 impl<'a, T> Lookup<'a, T> {
     fn new() -> Self {
-        Lookup { entries: Vec::new(), strings: HashMap::new(), others: Vec::new() }
+        Lookup { entries: Vec::new(), strings: FxHashMap::default(), others: Vec::new() }
     }
 
     fn position(&self, key: &Value) -> Option<usize> {
@@ -362,95 +365,100 @@ pub fn build_items(snapshot: &Value) -> Vec<Item> {
         }
     }
 
-    let mut items = Vec::new();
-    for tab in tabs {
-        let tab_id = tab.get("tab_id");
-        if !tab_id.truthy() {
-            continue;
-        }
-        let workspace_id_value = tab.get("workspace_id");
-        let workspace_id = or_empty(workspace_id_value);
-        let workspace_key = if workspace_id_value.truthy() { workspace_id_value.clone() } else { Value::str("") };
-        let workspace_label = labels.get(&workspace_key).cloned().unwrap_or_default();
-        let tab_number = tab_number_of(tab);
-        let tab_agents: Vec<&Value> = agents_by_tab.get(tab_id).cloned().unwrap_or_default();
-        let label = tab_label(tab, !tab_agents.is_empty());
+    // Each tab makes its rows from read-only lookups, so a big session
+    // builds them in parallel chunks (see `par`), joined back in order.
+    let mut items = crate::par::map_chunks(tabs, |tabs| {
+        let mut items = Vec::new();
+        for tab in tabs {
+            let tab_id = tab.get("tab_id");
+            if !tab_id.truthy() {
+                continue;
+            }
+            let workspace_id_value = tab.get("workspace_id");
+            let workspace_id = or_empty(workspace_id_value);
+            let workspace_key = if workspace_id_value.truthy() { workspace_id_value.clone() } else { Value::str("") };
+            let workspace_label = labels.get(&workspace_key).cloned().unwrap_or_default();
+            let tab_number = tab_number_of(tab);
+            let tab_agents: Vec<&Value> = agents_by_tab.get(tab_id).cloned().unwrap_or_default();
+            let label = tab_label(tab, !tab_agents.is_empty());
 
-        if tab_agents.is_empty() {
-            let pane = first_pane_by_tab.get(tab_id).copied();
-            let pane_value = pane.unwrap_or(&EMPTY);
-            let cwd = shorten_path(&first(&[pane_value.get("foreground_cwd"), pane_value.get("cwd")]));
-            let title = first_str(&[&label, pyos::basename(&cwd), "tab"]);
-            let pane_id = pane.and_then(|p| {
-                let id = p.get("pane_id");
-                if id.is_null() {
-                    None
-                } else {
-                    Some(pyjson::py_str(id))
-                }
-            });
-            items.push(Item::new(ItemInit {
-                kind: KIND_TAB,
-                key: pyjson::py_str(tab_id),
-                title,
-                detail: String::new(),
-                subtitle: cwd,
-                workspace_id,
-                workspace_label,
-                tab_id: Some(pyjson::py_str(tab_id)),
-                pane_id,
-                agent: None,
-                agent_name: None,
-                status: status_of(tab),
-                tab_number,
-                focused: pyjson::py_eq(tab_id, focused_tab_id),
-                extra_terms: Vec::new(),
-            }));
-            continue;
-        }
+            if tab_agents.is_empty() {
+                let pane = first_pane_by_tab.get(tab_id).copied();
+                let pane_value = pane.unwrap_or(&EMPTY);
+                let cwd = shorten_path(&first(&[pane_value.get("foreground_cwd"), pane_value.get("cwd")]));
+                let title = first_str(&[&label, pyos::basename(&cwd), "tab"]);
+                let pane_id = pane.and_then(|p| {
+                    let id = p.get("pane_id");
+                    if id.is_null() {
+                        None
+                    } else {
+                        Some(pyjson::py_str(id))
+                    }
+                });
+                items.push(Item::new(ItemInit {
+                    kind: KIND_TAB,
+                    key: pyjson::py_str(tab_id),
+                    title,
+                    detail: String::new(),
+                    subtitle: cwd,
+                    workspace_id,
+                    workspace_label,
+                    tab_id: Some(pyjson::py_str(tab_id)),
+                    pane_id,
+                    agent: None,
+                    agent_name: None,
+                    status: status_of(tab),
+                    tab_number,
+                    focused: pyjson::py_eq(tab_id, focused_tab_id),
+                    extra_terms: Vec::new(),
+                }));
+                continue;
+            }
 
-        for agent in &tab_agents {
-            let pane_id = agent.get("pane_id");
-            let pane = panes_by_id.get(pane_id).copied().unwrap_or(&EMPTY);
-            let cwd = shorten_path(&first(&[
-                agent.get("foreground_cwd"),
-                agent.get("cwd"),
-                pane.get("foreground_cwd"),
-                pane.get("cwd"),
-            ]));
-            let summary = first(&[
-                pane.get("title"),
-                agent.get("title"),
-                pane.get("label"),
-                agent.get("terminal_title_stripped"),
-                pane.get("terminal_title_stripped"),
-            ]);
-            let title = first_str(&[&label, &summary, pyos::basename(&cwd), "agent"]);
-            let detail =
-                if summary_repeats_title(&summary, &title, &cwd, &workspace_label) { String::new() } else { summary };
-            let agent_kind = first(&[agent.get("display_agent"), agent.get("agent")]);
-            let agent_name = first(&[agent.get("name")]);
-            let key = id_of(pane_id).unwrap_or_else(|| pyjson::py_str(tab_id));
-            items.push(Item::new(ItemInit {
-                kind: KIND_AGENT,
-                key,
-                title,
-                detail,
-                subtitle: cwd,
-                workspace_id: workspace_id.clone(),
-                workspace_label: workspace_label.clone(),
-                tab_id: Some(pyjson::py_str(tab_id)),
-                pane_id: if pane_id.is_null() { None } else { Some(pyjson::py_str(pane_id)) },
-                agent: Some(agent_kind),
-                agent_name: Some(agent_name),
-                status: status_of(agent),
-                tab_number: tab_number.clone(),
-                focused: pyjson::py_eq(pane_id, focused_pane_id)
-                    || (tab_agents.len() == 1 && pyjson::py_eq(tab_id, focused_tab_id)),
-                extra_terms: Vec::new(),
-            }));
+            for agent in &tab_agents {
+                let pane_id = agent.get("pane_id");
+                let pane = panes_by_id.get(pane_id).copied().unwrap_or(&EMPTY);
+                let cwd = shorten_path(&first(&[
+                    agent.get("foreground_cwd"),
+                    agent.get("cwd"),
+                    pane.get("foreground_cwd"),
+                    pane.get("cwd"),
+                ]));
+                let summary = first(&[
+                    pane.get("title"),
+                    agent.get("title"),
+                    pane.get("label"),
+                    agent.get("terminal_title_stripped"),
+                    pane.get("terminal_title_stripped"),
+                ]);
+                let title = first_str(&[&label, &summary, pyos::basename(&cwd), "agent"]);
+                let detail =
+                    if summary_repeats_title(&summary, &title, &cwd, &workspace_label) { String::new() } else { summary };
+                let agent_kind = first(&[agent.get("display_agent"), agent.get("agent")]);
+                let agent_name = first(&[agent.get("name")]);
+                let key = id_of(pane_id).unwrap_or_else(|| pyjson::py_str(tab_id));
+                items.push(Item::new(ItemInit {
+                    kind: KIND_AGENT,
+                    key,
+                    title,
+                    detail,
+                    subtitle: cwd,
+                    workspace_id: workspace_id.clone(),
+                    workspace_label: workspace_label.clone(),
+                    tab_id: Some(pyjson::py_str(tab_id)),
+                    pane_id: if pane_id.is_null() { None } else { Some(pyjson::py_str(pane_id)) },
+                    agent: Some(agent_kind),
+                    agent_name: Some(agent_name),
+                    status: status_of(agent),
+                    tab_number: tab_number.clone(),
+                    focused: pyjson::py_eq(pane_id, focused_pane_id)
+                        || (tab_agents.len() == 1 && pyjson::py_eq(tab_id, focused_tab_id)),
+                    extra_terms: Vec::new(),
+                }));
+            }
         }
-    }
+        items
+    });
 
     if workspaces.len() > 1 {
         for workspace in workspaces {
@@ -505,51 +513,53 @@ pub fn build_pane_items(snapshot: &Value) -> Vec<Item> {
         }
     }
 
-    let mut items = Vec::new();
-    for pane in panes {
-        let pane_id = pane.get("pane_id");
-        let tab_id = pane.get("tab_id");
-        let pane_label = clean(pane.get("label"));
-        if !pane_id.truthy() || !tab_id.truthy() || pane_label.is_empty() {
-            continue;
+    crate::par::map_chunks(panes, |panes| {
+        let mut items = Vec::new();
+        for pane in panes {
+            let pane_id = pane.get("pane_id");
+            let tab_id = pane.get("tab_id");
+            let pane_label = clean(pane.get("label"));
+            if !pane_id.truthy() || !tab_id.truthy() || pane_label.is_empty() {
+                continue;
+            }
+            let tab = tabs_by_id.get(tab_id).copied().unwrap_or(&EMPTY);
+            let workspace_value = if pane.get("workspace_id").truthy() {
+                pane.get("workspace_id").clone()
+            } else if tab.get("workspace_id").truthy() {
+                tab.get("workspace_id").clone()
+            } else {
+                Value::str("")
+            };
+            let workspace_label = labels.get(&workspace_value).cloned().unwrap_or_default();
+            let tab_label = first(&[tab.get("label")]);
+            let tab_number = tab_number_of(tab);
+            let cwd = shorten_path(&first(&[pane.get("foreground_cwd"), pane.get("cwd")]));
+            let terminal_title = first(&[pane.get("terminal_title_stripped"), pane.get("title")]);
+            let title = pane_label;
+            let detail = if !tab_label.is_empty() && pystr::lower(&tab_label) != pystr::lower(&title) {
+                tab_label
+            } else {
+                String::new()
+            };
+            let agent = first(&[pane.get("display_agent"), pane.get("agent")]);
+            items.push(Item::new(ItemInit {
+                kind: KIND_PANE,
+                key: format!("pane:{}", pyjson::py_str(pane_id)),
+                title,
+                detail,
+                subtitle: cwd,
+                workspace_id: pyjson::py_str(&workspace_value),
+                workspace_label,
+                tab_id: Some(pyjson::py_str(tab_id)),
+                pane_id: Some(pyjson::py_str(pane_id)),
+                agent: if agent.is_empty() { None } else { Some(agent) },
+                agent_name: None,
+                status: status_of(pane),
+                tab_number,
+                focused: pyjson::py_eq(pane_id, focused_pane_id),
+                extra_terms: vec!["pane".into(), pyjson::py_str(pane_id), terminal_title],
+            }));
         }
-        let tab = tabs_by_id.get(tab_id).copied().unwrap_or(&EMPTY);
-        let workspace_value = if pane.get("workspace_id").truthy() {
-            pane.get("workspace_id").clone()
-        } else if tab.get("workspace_id").truthy() {
-            tab.get("workspace_id").clone()
-        } else {
-            Value::str("")
-        };
-        let workspace_label = labels.get(&workspace_value).cloned().unwrap_or_default();
-        let tab_label = first(&[tab.get("label")]);
-        let tab_number = tab_number_of(tab);
-        let cwd = shorten_path(&first(&[pane.get("foreground_cwd"), pane.get("cwd")]));
-        let terminal_title = first(&[pane.get("terminal_title_stripped"), pane.get("title")]);
-        let title = pane_label;
-        let detail = if !tab_label.is_empty() && pystr::lower(&tab_label) != pystr::lower(&title) {
-            tab_label
-        } else {
-            String::new()
-        };
-        let agent = first(&[pane.get("display_agent"), pane.get("agent")]);
-        items.push(Item::new(ItemInit {
-            kind: KIND_PANE,
-            key: format!("pane:{}", pyjson::py_str(pane_id)),
-            title,
-            detail,
-            subtitle: cwd,
-            workspace_id: pyjson::py_str(&workspace_value),
-            workspace_label,
-            tab_id: Some(pyjson::py_str(tab_id)),
-            pane_id: Some(pyjson::py_str(pane_id)),
-            agent: if agent.is_empty() { None } else { Some(agent) },
-            agent_name: None,
-            status: status_of(pane),
-            tab_number,
-            focused: pyjson::py_eq(pane_id, focused_pane_id),
-            extra_terms: vec!["pane".into(), pyjson::py_str(pane_id), terminal_title],
-        }));
-    }
-    items
+        items
+    })
 }

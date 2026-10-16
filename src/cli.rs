@@ -1,6 +1,6 @@
 //! Command line entry point.
 
-use crate::app::{jump, Bar};
+use crate::app::{jump, Bar, Pool};
 use crate::client::HerdrClient;
 use crate::config::Config;
 use crate::host;
@@ -224,10 +224,15 @@ pub fn main(args: Vec<String>) -> i32 {
     if config.agent_icons.as_str() == Some("auto") {
         icons::prefetch();
     }
+    let fetch_config = config.clone();
     let fetch = std::thread::spawn(move || {
         let mut client = client;
-        let snapshot = client.snapshot();
-        (client, snapshot)
+        let mut answer = Vec::new();
+        // Nothing to compare against yet, so this always reads a snapshot.
+        let pool = client
+            .snapshot_since(&mut answer)
+            .map(|snapshot| Pool::build(&snapshot.unwrap_or(Value::Null), &fetch_config));
+        (client, pool, answer)
     });
 
     let mut recents = Recents::new(state_path());
@@ -245,10 +250,10 @@ pub fn main(args: Vec<String>) -> i32 {
 
     title_watcher::start(false);
     let mouse = config.mouse;
-    let (client, snapshot) = fetch.join().unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+    let (client, pool, answer) = fetch.join().unwrap_or_else(|panic| std::panic::resume_unwind(panic));
     let mut bar = Bar::new(client, config, Recents::new(None), theme);
     std::mem::swap(&mut bar.recents, &mut recents);
-    if let Err(error) = bar.bootstrap(snapshot) {
+    if let Err(error) = bar.bootstrap(pool, answer) {
         return fail(&error.message);
     }
 

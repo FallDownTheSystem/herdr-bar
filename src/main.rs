@@ -7,6 +7,7 @@ mod cli;
 mod client;
 mod config;
 mod fuzzy;
+mod fxhash;
 mod host;
 mod icons;
 mod items;
@@ -14,6 +15,7 @@ mod keys;
 mod mru;
 mod opener;
 mod paint;
+mod par;
 mod proc;
 #[cfg(feature = "probe")]
 mod probe;

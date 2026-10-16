@@ -4,6 +4,7 @@ use crate::age::{elapsed_seconds_many, pid_for};
 use crate::client::{HerdrClient, Result};
 use crate::config::Config;
 use crate::fuzzy::{match_prepared, split_query, Match, Term};
+use crate::fxhash::FxHashMap;
 use crate::icons;
 use crate::items::{build_items, build_pane_items, Item, KIND_AGENT, KIND_PANE, KIND_SPACE, KIND_TAB};
 use crate::keys::{Event, KeyDecoder, MouseKind};
@@ -85,7 +86,7 @@ fn squeeze(text: &str) -> String {
     pystr::split_whitespace(text).join(" ")
 }
 
-pub type Memo<'a> = HashMap<(usize, &'a str), Option<Match>>;
+pub type Memo<'a> = FxHashMap<(usize, &'a str), Option<Match>>;
 
 /// Score one row: every term must match one field, best field wins.
 ///
@@ -131,6 +132,34 @@ pub enum Outcome {
     Confirm,
 }
 
+/// The rows one snapshot makes, before the bar takes them in.
+pub struct Pool {
+    workspace_count: usize,
+    /// The tab and agent items, then the pane items.
+    items: Vec<Item>,
+    item_count: usize,
+}
+
+impl Pool {
+    /// Pure: depends on the snapshot and the config alone, so it can be
+    /// built on another thread.
+    pub fn build(snapshot: &Value, config: &Config) -> Pool {
+        let workspace_count = match snapshot.get("workspaces") {
+            Value::List(list) => list.len(),
+            Value::Dict(map) => map.len(),
+            Value::Str(text) => pystr::len(text),
+            _ => 0,
+        };
+        let mut items = build_items(snapshot);
+        if !config.wants_workspaces(workspace_count) {
+            items.retain(|item| item.kind != KIND_SPACE);
+        }
+        let item_count = items.len();
+        items.extend(build_pane_items(snapshot));
+        Pool { workspace_count, items, item_count }
+    }
+}
+
 pub struct Bar {
     pub client: HerdrClient,
     pub config: Config,
@@ -157,6 +186,8 @@ pub struct Bar {
     pub pending_rename: Option<(String, String)>,
     pub rename_text: String,
     pub rename_cursor: usize,
+    /// Herdr's answer the pool was last built from (see `snapshot_since`).
+    snapshot_answer: Vec<u8>,
     preview_cache: HashMap<String, (f64, Vec<String>)>,
     preview_pending: Option<(String, f64)>,
     ages: HashMap<String, Option<(f64, f64)>>,
@@ -197,6 +228,7 @@ impl Bar {
             pending_rename: None,
             rename_text: String::new(),
             rename_cursor: 0,
+            snapshot_answer: Vec::new(),
             preview_cache: HashMap::new(),
             preview_pending: None,
             ages: HashMap::new(),
@@ -221,17 +253,19 @@ impl Bar {
 
     /// First load, outside the alt screen, so failures can be reported.
     ///
-    /// The caller fetches the snapshot itself, so the round trip can overlap
-    /// the rest of startup.
-    pub fn bootstrap(&mut self, snapshot: Result<Value>) -> Result<()> {
-        let snapshot = snapshot?;
-        self.apply(&snapshot, false);
+    /// The caller fetches the snapshot and builds its rows itself, so that
+    /// work can overlap the rest of startup.
+    pub fn bootstrap(&mut self, pool: Result<Pool>, answer: Vec<u8>) -> Result<()> {
+        let pool = pool?;
+        self.snapshot_answer = answer;
+        self.install(pool, false);
         Ok(())
     }
 
     pub fn refresh(&mut self, force: bool) {
-        match self.client.snapshot() {
-            Ok(snapshot) => self.apply(&snapshot, force),
+        match self.client.snapshot_since(&mut self.snapshot_answer) {
+            Ok(Some(snapshot)) => self.apply(&snapshot, force),
+            Ok(None) => self.reapply(force),
             Err(error) => {
                 self.flash(error.message);
                 self.last_refresh = monotonic();
@@ -239,34 +273,44 @@ impl Bar {
         }
     }
 
+    /// `apply` for a snapshot identical to the one the pool was built from.
+    ///
+    /// Building it again would give the same items, the same current row
+    /// and -- since every change to the query, scope or pool already
+    /// rebuilt them -- the same rows, so only what depends on the moment is
+    /// redone: the refresh clock and keeping the selection on its row.
+    fn reapply(&mut self, force: bool) {
+        let keep = if self.rows.is_empty() || force { None } else { Some(self.selected_item().key.clone()) };
+        self.last_refresh = monotonic();
+        self.reselect(keep);
+    }
+
     fn apply(&mut self, snapshot: &Value, force: bool) {
+        self.install(Pool::build(snapshot, &self.config), force);
+    }
+
+    fn install(&mut self, pool: Pool, force: bool) {
         let keep = if self.rows.is_empty() { None } else { Some(self.selected_item().key.clone()) };
-        self.workspace_count = match snapshot.get("workspaces") {
-            Value::List(list) => list.len(),
-            Value::Dict(map) => map.len(),
-            Value::Str(text) => pystr::len(text),
-            _ => 0,
-        };
-        let mut items = build_items(snapshot);
-        if !self.config.wants_workspaces(self.workspace_count) {
-            items.retain(|item| item.kind != KIND_SPACE);
-        }
-        for item in &items {
+        self.workspace_count = pool.workspace_count;
+        for item in &pool.items[..pool.item_count] {
             if item.focused && item.kind != KIND_SPACE {
                 self.current_key = Some(item.key.clone());
                 self.current_title = item.title.clone();
                 break;
             }
         }
-        self.item_count = items.len();
-        items.extend(build_pane_items(snapshot));
-        self.pool = items;
+        self.item_count = pool.item_count;
+        self.pool = pool.items;
         self.last_refresh = monotonic();
         self.rebuild(if force { None } else { keep });
     }
 
     pub fn rebuild(&mut self, keep_key: Option<String>) {
         self.rows = self.filter();
+        self.reselect(keep_key);
+    }
+
+    fn reselect(&mut self, keep_key: Option<String>) {
         if let Some(keep) = keep_key.filter(|k| !k.is_empty()) {
             match self.rows.iter().position(|row| self.pool[row.item].key == keep) {
                 Some(index) => self.selected = index,
@@ -303,20 +347,30 @@ impl Bar {
                 .collect();
         }
         let terms: Vec<Term> = terms.iter().map(|t| Term::new(t)).collect();
-        let mut scored: Vec<((i64, usize, i64, usize), Row)> = Vec::new();
-        let mut memo: Memo = HashMap::new();
-        for index in candidates {
-            let item = &self.pool[index];
-            let Some((score, by_field)) = score_item(&terms, item, &mut memo) else { continue };
-            let rank = self.recents.rank(&item.key, &item.title).unwrap_or(999);
-            let positions = by_field.get(&0).cloned().unwrap_or_default();
-            scored.push((
-                (-score, rank, item.status_rank(), char_len(&item.title)),
-                Row { item: index, positions, field_positions: by_field },
-            ));
-        }
-        scored.sort_by_key(|a| a.0);
-        scored.into_iter().map(|(_, row)| row).collect()
+        let (pool, recents) = (&self.pool, &self.recents);
+        // Rows score independently, so a big list is scored in chunks (see
+        // `par`); each chunk keeps its own memo, which only saves work.
+        let mut scored: Vec<((i64, usize, i64, usize), Row)> = crate::par::map_chunks(&candidates, |chunk| {
+            let mut memo: Memo = Memo::default();
+            let mut scored = Vec::new();
+            for &index in chunk {
+                let item = &pool[index];
+                let Some((score, by_field)) = score_item(&terms, item, &mut memo) else { continue };
+                let rank = recents.rank(&item.key, &item.title).unwrap_or(999);
+                let positions = by_field.get(&0).cloned().unwrap_or_default();
+                scored.push((
+                    (-score, rank, item.status_rank(), char_len(&item.title)),
+                    Row { item: index, positions, field_positions: by_field },
+                ));
+            }
+            scored
+        });
+        // A stable sort on the keys alone, carrying positions instead of
+        // whole rows, is the same order as sorting the rows by key.
+        let mut order: Vec<usize> = (0..scored.len()).collect();
+        order.sort_by_key(|&at| scored[at].0);
+        let mut rows: Vec<Option<Row>> = scored.drain(..).map(|(_, row)| Some(row)).collect();
+        order.into_iter().filter_map(|at| rows[at].take()).collect()
     }
 
     fn resting_order(&self, items: &[usize]) -> Vec<usize> {
