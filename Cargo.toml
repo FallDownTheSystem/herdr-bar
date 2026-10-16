@@ -1,0 +1,32 @@
+[package]
+name = "herdr-bar"
+version = "0.8.0"
+edition = "2021"
+description = "Cmd+K command bar for Herdr with agent icons, fuzzy search, and automatic tab titles"
+license = "MIT"
+publish = false
+
+[[bin]]
+name = "herdr-bar"
+path = "src/main.rs"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Console",
+    "Win32_System_IO",
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
+    "Win32_System_SystemInformation",
+    "Win32_Security",
+] }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true
