@@ -10,6 +10,7 @@ use crate::pyjson::{self, Value};
 use crate::pyos;
 use crate::pystr;
 use crate::tab_status;
+use std::collections::HashMap;
 
 pub const KIND_AGENT: &str = "agent";
 pub const KIND_PANE: &str = "pane";
@@ -230,23 +231,62 @@ fn tab_number_of(record: &Value) -> Option<Value> {
 }
 
 /// A dict keyed by JSON values, compared the way Python compares keys.
+///
+/// Ids are strings in every real snapshot, and a string only ever equals
+/// another string with the same text, so string keys go through a hash
+/// index. Anything else (numbers, bools, null) keeps the ordered `py_eq`
+/// scan, over the non-string keys alone: the answer is the same either way.
 struct Lookup<'a, T> {
     entries: Vec<(&'a Value, T)>,
+    strings: HashMap<&'a str, usize>,
+    others: Vec<usize>,
 }
 
 impl<'a, T> Lookup<'a, T> {
     fn new() -> Self {
-        Lookup { entries: Vec::new() }
+        Lookup { entries: Vec::new(), strings: HashMap::new(), others: Vec::new() }
     }
 
     fn position(&self, key: &Value) -> Option<usize> {
-        self.entries.iter().position(|(k, _)| pyjson::py_eq(k, key))
+        match key {
+            Value::Str(text) => self.strings.get(text.as_str()).copied(),
+            _ => self.others.iter().copied().find(|&index| pyjson::py_eq(self.entries[index].0, key)),
+        }
+    }
+
+    /// Append a new entry; a string key must not be present yet.
+    fn push(&mut self, key: &'a Value, value: T) -> usize {
+        let index = self.entries.len();
+        match key {
+            Value::Str(text) => {
+                self.strings.insert(text.as_str(), index);
+            }
+            _ => self.others.push(index),
+        }
+        self.entries.push((key, value));
+        index
     }
 
     fn insert(&mut self, key: &'a Value, value: T) {
         match self.position(key) {
             Some(index) => self.entries[index].1 = value,
-            None => self.entries.push((key, value)),
+            None => {
+                self.push(key, value);
+            }
+        }
+    }
+
+    /// Every value in order, answering `get` the way `next(v for v in values
+    /// if v.key == key)` does: the first one whose key is equal.
+    ///
+    /// Number keys are all kept, because `==` across ints and floats is not
+    /// transitive and the first equal one depends on the key asked for.
+    fn push_first(&mut self, key: &'a Value, value: T) {
+        match key {
+            Value::Str(text) if self.strings.contains_key(text.as_str()) => {}
+            _ => {
+                self.push(key, value);
+            }
         }
     }
 
@@ -257,10 +297,7 @@ impl<'a, T> Lookup<'a, T> {
     fn get_mut_or_insert(&mut self, key: &'a Value, default: impl FnOnce() -> T) -> &mut T {
         let index = match self.position(key) {
             Some(index) => index,
-            None => {
-                self.entries.push((key, default()));
-                self.entries.len() - 1
-            }
+            None => self.push(key, default()),
         };
         &mut self.entries[index].1
     }
@@ -313,6 +350,10 @@ pub fn build_items(snapshot: &Value) -> Vec<Item> {
             tabs_by_id.insert(id, tab);
         }
     }
+    let mut first_pane_by_tab: Lookup<&Value> = Lookup::new();
+    for pane in panes {
+        first_pane_by_tab.push_first(pane.get("tab_id"), pane);
+    }
     let mut agents_by_tab: Lookup<Vec<&Value>> = Lookup::new();
     for agent in agents {
         let tab_id = agent.get("tab_id");
@@ -336,7 +377,7 @@ pub fn build_items(snapshot: &Value) -> Vec<Item> {
         let label = tab_label(tab, !tab_agents.is_empty());
 
         if tab_agents.is_empty() {
-            let pane = panes.iter().find(|candidate| pyjson::py_eq(candidate.get("tab_id"), tab_id));
+            let pane = first_pane_by_tab.get(tab_id).copied();
             let pane_value = pane.unwrap_or(&EMPTY);
             let cwd = shorten_path(&first(&[pane_value.get("foreground_cwd"), pane_value.get("cwd")]));
             let title = first_str(&[&label, pyos::basename(&cwd), "tab"]);
