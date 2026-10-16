@@ -9,7 +9,6 @@
 //! * the `herdr` CLI at `HERDR_BIN_PATH` -- portable, works when the socket
 //!   is missing. Used as the automatic fallback for everything else.
 
-use crate::age::{elapsed_seconds, pid_for};
 use crate::host;
 use crate::opener::herdr_bin;
 use crate::pyjson::{self, Map, Value};
@@ -260,12 +259,6 @@ impl HerdrClient {
             Some(info @ Value::Dict(_)) => Ok(info),
             _ => Ok(Value::Dict(Map::new())),
         }
-    }
-
-    /// Seconds the pane's process has been running, or None if unknown.
-    pub fn pane_age(&mut self, pane_id: &str) -> Result<Option<f64>> {
-        let info = self.process_info(pane_id)?;
-        Ok(pid_for(&info).and_then(|pid| elapsed_seconds(&pid)))
     }
 
     pub fn close_tab(&mut self, tab_id: &str) -> Result<()> {

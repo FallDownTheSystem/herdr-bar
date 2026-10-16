@@ -1,5 +1,6 @@
 //! The bar itself: state, key handling, and the draw loop.
 
+use crate::age::{elapsed_seconds_many, pid_for};
 use crate::client::{HerdrClient, Result};
 use crate::config::Config;
 use crate::fuzzy::{match_prepared, split_query, Match, Term};
@@ -219,8 +220,11 @@ impl Bar {
     // -- data ---------------------------------------------------------------
 
     /// First load, outside the alt screen, so failures can be reported.
-    pub fn bootstrap(&mut self) -> Result<()> {
-        let snapshot = self.client.snapshot()?;
+    ///
+    /// The caller fetches the snapshot itself, so the round trip can overlap
+    /// the rest of startup.
+    pub fn bootstrap(&mut self, snapshot: Result<Value>) -> Result<()> {
+        let snapshot = snapshot?;
         self.apply(&snapshot, false);
         Ok(())
     }
@@ -801,20 +805,31 @@ impl Bar {
         }
     }
 
-    /// Take at most one reading per pass, so input never waits on ps.
+    /// Date every queued pane in one pass.
+    ///
+    /// Each pane still costs its own `pane.process_info`, in queue order, but
+    /// the process table is read once for all of them: a screenful of new
+    /// rows waits on one `ps` rather than one each, so input waits on at
+    /// most one too.
     fn pump_ages(&mut self) {
-        while !self.age_queue.is_empty() {
-            let pane_id = self.age_queue.remove(0);
-            if self.ages.contains_key(&pane_id) {
-                continue;
+        let mut panes: Vec<String> = Vec::new();
+        for pane_id in std::mem::take(&mut self.age_queue) {
+            if !self.ages.contains_key(&pane_id) && !panes.contains(&pane_id) {
+                panes.push(pane_id);
             }
-            let seconds = self.client.pane_age(&pane_id).unwrap_or(None);
+        }
+        if panes.is_empty() {
+            return;
+        }
+        let pids: Vec<Option<Value>> =
+            panes.iter().map(|pane_id| self.client.process_info(pane_id).ok().and_then(|info| pid_for(&info))).collect();
+        let readings = elapsed_seconds_many(&pids);
+        for (pane_id, seconds) in panes.into_iter().zip(readings) {
             // A pane that cannot be dated is remembered as such: one failed
             // reading is enough, and the row simply shows no time.
             self.ages.insert(pane_id, seconds.map(|s| (monotonic(), s)));
-            self.dirty = true;
-            return;
         }
+        self.dirty = true;
     }
 
     // -- drawing ------------------------------------------------------------

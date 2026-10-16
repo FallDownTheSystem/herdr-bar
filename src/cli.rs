@@ -4,6 +4,7 @@ use crate::app::{jump, Bar};
 use crate::client::HerdrClient;
 use crate::config::Config;
 use crate::host;
+use crate::icons;
 use crate::items::build_items;
 use crate::mru::Recents;
 use crate::opener::open_bar;
@@ -217,6 +218,18 @@ pub fn main(args: Vec<String>) -> i32 {
         return fail("needs a terminal; run it from Herdr with `plugin pane open`");
     }
 
+    // Two slow, independent reads run on their own threads while the
+    // terminal answers the appearance query: the font check (fc-match) and
+    // the first snapshot. Both are joined, in the original order, below.
+    if config.agent_icons.as_str() == Some("auto") {
+        icons::prefetch();
+    }
+    let fetch = std::thread::spawn(move || {
+        let mut client = client;
+        let snapshot = client.snapshot();
+        (client, snapshot)
+    });
+
     let mut recents = Recents::new(state_path());
     let configured = config.selection_background.clone();
     let auto = configured.as_str() == Some("auto");
@@ -232,9 +245,10 @@ pub fn main(args: Vec<String>) -> i32 {
 
     title_watcher::start(false);
     let mouse = config.mouse;
+    let (client, snapshot) = fetch.join().unwrap_or_else(|panic| std::panic::resume_unwind(panic));
     let mut bar = Bar::new(client, config, Recents::new(None), theme);
     std::mem::swap(&mut bar.recents, &mut recents);
-    if let Err(error) = bar.bootstrap() {
+    if let Err(error) = bar.bootstrap(snapshot) {
         return fail(&error.message);
     }
 

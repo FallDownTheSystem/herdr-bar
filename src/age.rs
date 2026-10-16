@@ -95,6 +95,94 @@ pub fn elapsed_seconds(pid: &Value) -> Option<f64> {
     }
 }
 
+/// `elapsed_seconds` for many processes, with one `ps` where one will do.
+///
+/// Plain pids are asked about together (`ps -o pid=,etime= -p a,b,c`) and
+/// matched back by pid; a pid ps leaves out is one it could not date, which
+/// is what an empty answer for it alone would have meant. Anything ps could
+/// reject as a whole list (a bool, a huge number) still goes on its own, and
+/// any answer that does not look like the one asked for falls back to one
+/// `ps` per pid, so the readings are exactly the ones `elapsed_seconds` gives.
+pub fn elapsed_seconds_many(pids: &[Option<Value>]) -> Vec<Option<f64>> {
+    let mut results: Vec<Option<f64>> = vec![None; pids.len()];
+    #[cfg(not(windows))]
+    let batch: Vec<usize> = (0..pids.len())
+        .filter(|&i| matches!(pids[i], Some(Value::Int(pid)) if (1..=0x7fff_ffff).contains(&pid)))
+        .collect();
+    #[cfg(windows)]
+    let batch: Vec<usize> = Vec::new();
+    let mut alone: Vec<usize> = (0..pids.len()).filter(|i| pids[*i].is_some() && !batch.contains(i)).collect();
+    if batch.len() > 1 {
+        match batch_etimes(&batch.iter().map(|&i| pids[i].as_ref().and_then(|p| p.as_int()).unwrap_or(0)).collect::<Vec<_>>()) {
+            Some(found) => {
+                for (&index, seconds) in batch.iter().zip(found) {
+                    results[index] = seconds;
+                }
+            }
+            None => alone.extend(batch),
+        }
+    } else {
+        alone.extend(batch);
+    }
+    alone.sort_unstable();
+    for index in alone {
+        if let Some(pid) = &pids[index] {
+            results[index] = elapsed_seconds(pid);
+        }
+    }
+    results
+}
+
+/// One `ps` for several pids; None when the answer cannot be trusted to be
+/// the same as asking one at a time (the caller then does exactly that).
+#[cfg(not(windows))]
+fn batch_etimes(pids: &[i128]) -> Option<Vec<Option<f64>>> {
+    let mut list: Vec<String> = Vec::new();
+    for pid in pids {
+        let text = pid.to_string();
+        if !list.contains(&text) {
+            list.push(text);
+        }
+    }
+    let argv = ["ps".to_string(), "-o".into(), "pid=,etime=".into(), "-p".into(), list.join(",")];
+    let output = match crate::proc::run(&argv, 1.0) {
+        Ok(output) => output,
+        // Not installed, or no answer in time: no pid gets a reading, which
+        // is what asking for each one alone would have given.
+        Err(_) => return Some(vec![None; pids.len()]),
+    };
+    let text: String = output.stdout.iter().map(|&b| if b < 0x80 { b as char } else { '\u{FFFD}' }).collect();
+    let mut etimes: Vec<(i128, &str)> = Vec::new();
+    for line in text.lines() {
+        let mut fields = line.split_ascii_whitespace();
+        let (Some(pid), Some(etime), None) = (fields.next(), fields.next(), fields.next()) else {
+            if line.trim().is_empty() {
+                continue;
+            }
+            return None;
+        };
+        let pid: i128 = pid.parse().ok()?;
+        if !pids.contains(&pid) || etimes.iter().any(|(seen, _)| *seen == pid) {
+            return None;
+        }
+        etimes.push((pid, etime));
+    }
+    if etimes.is_empty() && !output.success {
+        // Nothing found, or a ps that does not take a list: ask one by one.
+        return None;
+    }
+    Some(
+        pids.iter()
+            .map(|pid| etimes.iter().find(|(seen, _)| seen == pid).and_then(|(_, etime)| parse_etime(etime)))
+            .collect(),
+    )
+}
+
+#[cfg(windows)]
+fn batch_etimes(_pids: &[i128]) -> Option<Vec<Option<f64>>> {
+    None
+}
+
 /// A running time short enough to sit in a row: 42s, 7m, 2h04m, 3d4h.
 pub fn format_age(seconds: f64) -> String {
     let total = seconds.trunc() as i128;
@@ -114,4 +202,32 @@ pub fn format_age(seconds: f64) -> String {
     }
     let (days, hours) = (hours / 24, hours % 24);
     format!("{}d{}h", days, hours)
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn batch_reads_match_one_at_a_time() {
+        let pids = vec![
+            Some(Value::Int(1)),
+            None,
+            Some(Value::Int(std::process::id() as i128)),
+            Some(Value::Int(0x7fff_fffe)),
+            Some(Value::Bool(true)),
+            Some(Value::Int(1)),
+            Some(Value::BigInt("99999999999999999999999999999999999999999".into())),
+        ];
+        let batched = elapsed_seconds_many(&pids);
+        let alone: Vec<Option<f64>> = pids.iter().map(|p| p.as_ref().and_then(elapsed_seconds)).collect();
+        assert_eq!(batched.len(), alone.len());
+        for (b, a) in batched.iter().zip(&alone) {
+            match (b, a) {
+                (Some(b), Some(a)) => assert!((b - a).abs() <= 1.0),
+                (b, a) => assert_eq!(b, a),
+            }
+        }
+        assert!(batched[0].is_some() && batched[2].is_some());
+    }
 }

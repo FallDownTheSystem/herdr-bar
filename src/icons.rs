@@ -8,6 +8,8 @@ use crate::pyos;
 use crate::pystr;
 use std::cell::Cell;
 use std::path::PathBuf;
+use std::sync::Mutex;
+use std::thread::JoinHandle;
 
 pub const FAMILY: &str = "Herdr Agent Icons Max";
 pub const VENDORS: &[&str] = &[
@@ -82,13 +84,33 @@ fn detect() -> bool {
     false
 }
 
+/// A detection already running on another thread, for the next caller.
+static PREFETCH: Mutex<Option<JoinHandle<bool>>> = Mutex::new(None);
+
+/// Start detecting now, while the caller does other startup work.
+///
+/// `fc-match` costs several milliseconds and nothing it reads depends on
+/// what happens meanwhile, so the popup overlaps it with the snapshot fetch.
+/// The answer is the same one `font_available` would have computed.
+pub fn prefetch() {
+    let handle = std::thread::spawn(detect);
+    if let Ok(mut slot) = PREFETCH.lock() {
+        *slot = Some(handle);
+    }
+}
+
+fn prefetched() -> Option<bool> {
+    let handle = PREFETCH.lock().ok()?.take()?;
+    handle.join().ok()
+}
+
 /// Best-effort local detection, once per popup; remote fonts need opt-in.
 pub fn font_available() -> bool {
     FONT.with(|f| {
         if let Some(known) = f.get() {
             return known;
         }
-        let found = detect();
+        let found = prefetched().unwrap_or_else(detect);
         f.set(Some(found));
         found
     })
