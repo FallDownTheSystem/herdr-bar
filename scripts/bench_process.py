@@ -387,6 +387,8 @@ class Workspace(object):
             "HERDR_PLUGIN_STATE_DIR": self.state_dir,
             # Never reach a real Herdr through the CLI fallback.
             "HERDR_BIN_PATH": "/nonexistent/herdr",
+            # Keep `run.py` on the Python build even when bin/herdr-bar exists.
+            "HERDR_BAR_PYTHON": "1",
         }
         return env
 

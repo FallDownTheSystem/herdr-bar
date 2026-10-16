@@ -208,6 +208,8 @@ class Machine(object):
             "HERDR_PLUGIN_CONFIG_DIR": self.config_dir,
             "HERDR_PLUGIN_STATE_DIR": self.state_dir,
             "HERDR_BIN_PATH": "/nonexistent/herdr",
+            # Keep `run.py` on the Python build even when bin/herdr-bar exists.
+            "HERDR_BAR_PYTHON": "1",
         }
 
     def state_files(self) -> Dict[str, Any]:

@@ -6,10 +6,25 @@ min_herdr_version = "0.9.0"
 description = "Cmd+K command bar with agent icons, fuzzy search, and optional automatic tab titles"
 platforms = ["linux", "macos", "windows"]
 
+# The plugin is a Rust binary at bin/herdr-bar (bin/herdr-bar.exe on Windows).
+# On install and update, Herdr runs these steps in the plugin directory: they
+# download the release binary for this version and platform, check it against
+# the release's SHA256SUMS, and fall back to `cargo build --release`. Herdr
+# resolves a command path with a separator from the plugin directory. On
+# Windows the step also leaves an extensionless bin/herdr-bar copy, so the
+# shared commands below run there as written.
+[[build]]
+command = ["sh", "scripts/install.sh"]
+platforms = ["linux", "macos"]
+
+[[build]]
+command = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "scripts/install.ps1"]
+platforms = ["windows"]
+
 # Opening the bar is a one-liner through the Herdr CLI, so the action stays a
-# shell exec instead of paying a second interpreter startup. HERDR_BIN_PATH can
-# outlive the binary it points at when Herdr is upgraded under a running
-# server, so fall back to whatever is on PATH.
+# shell exec instead of starting the plugin binary just to start Herdr's.
+# HERDR_BIN_PATH can outlive the binary it points at when Herdr is upgraded
+# under a running server, so fall back to whatever is on PATH.
 [[actions]]
 id = "open"
 title = "Open bar"
@@ -24,16 +39,14 @@ command = [
 
 # Windows has no `sh`, and Herdr rejects a second `open` action even with a
 # different `platforms` list, so Windows gets its own id. The same one-liner
-# lives in src/herdr_bar/opener.py and costs one interpreter startup. On
-# Windows, `python3` must start Python 3.9+; the Microsoft Store build of
-# Python provides it.
+# lives in the binary's --open.
 [[actions]]
 id = "open-windows"
 title = "Open bar"
 description = "Fuzzy-jump to any tab, pane, or agent"
 contexts = ["global"]
 platforms = ["windows"]
-command = ["python3", "run.py", "--open"]
+command = ["bin/herdr-bar.exe", "--open"]
 
 [[panes]]
 id = "bar"
@@ -42,25 +55,25 @@ description = "Fuzzy-jump to any tab, pane, or agent"
 placement = "popup"
 width = "74%"
 height = "62%"
-command = ["python3", "run.py"]
+command = ["bin/herdr-bar"]
 
 [[startup]]
-command = ["python3", "run.py", "--start-titles"]
+command = ["bin/herdr-bar", "--start-titles"]
 
 [[events]]
 on = "pane.agent_detected"
-command = ["python3", "run.py", "--start-titles"]
+command = ["bin/herdr-bar", "--start-titles"]
 
 [[actions]]
 id = "start-titles"
 title = "Start tab watcher"
 description = "Start task title and tab status updates enabled in the plugin config"
 contexts = ["global"]
-command = ["python3", "run.py", "--start-titles", "--resume"]
+command = ["bin/herdr-bar", "--start-titles", "--resume"]
 
 [[actions]]
 id = "stop-titles"
 title = "Stop tab watcher"
 description = "Stop this server's title and status watcher, restoring bare tab names"
 contexts = ["global"]
-command = ["python3", "run.py", "--stop-titles"]
+command = ["bin/herdr-bar", "--stop-titles"]
