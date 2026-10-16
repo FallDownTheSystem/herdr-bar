@@ -100,6 +100,7 @@ pub fn dict(entries: &[(&str, Value)]) -> Value {
     Value::Dict(map)
 }
 
+#[derive(Clone)]
 pub struct HerdrClient {
     pub socket_path: Option<String>,
     pub bin_path: String,
@@ -308,6 +309,43 @@ impl HerdrClient {
             Some(info @ Value::Dict(_)) => Ok(info),
             _ => Ok(Value::Dict(Map::new())),
         }
+    }
+
+    /// `process_info` for each pane, in order.
+    ///
+    /// Over the socket every request is its own connection anyway, so a
+    /// screenful of them goes out on a few connections at once instead of
+    /// one after another. Each answer is the one `process_info` gives; a
+    /// transport failure on any of them stops trusting the socket afterwards,
+    /// as it would have in sequence.
+    pub fn process_infos(&mut self, pane_ids: &[String]) -> Vec<Result<Value>> {
+        const MAX_CONNECTIONS: usize = 8;
+        if pane_ids.len() < 2 || self.socket_only || !self.socket_ok {
+            return pane_ids.iter().map(|pane_id| self.process_info(pane_id)).collect();
+        }
+        let size = pane_ids.len().div_ceil(MAX_CONNECTIONS);
+        let (results, socket_ok) = std::thread::scope(|scope| {
+            let handles: Vec<_> = pane_ids
+                .chunks(size)
+                .map(|chunk| {
+                    let mut client = self.clone();
+                    scope.spawn(move || {
+                        let results: Vec<Result<Value>> = chunk.iter().map(|pane_id| client.process_info(pane_id)).collect();
+                        (results, client.socket_ok)
+                    })
+                })
+                .collect();
+            let mut results = Vec::with_capacity(pane_ids.len());
+            let mut socket_ok = true;
+            for handle in handles {
+                let (chunk, ok) = handle.join().unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+                results.extend(chunk);
+                socket_ok &= ok;
+            }
+            (results, socket_ok)
+        });
+        self.socket_ok &= socket_ok;
+        results
     }
 
     pub fn close_tab(&mut self, tab_id: &str) -> Result<()> {

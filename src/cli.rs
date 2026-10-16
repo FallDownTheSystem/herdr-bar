@@ -251,7 +251,9 @@ pub fn main(args: Vec<String>) -> i32 {
     title_watcher::start(false);
     let mouse = config.mouse;
     let (client, pool, answer) = fetch.join().unwrap_or_else(|panic| std::panic::resume_unwind(panic));
-    let mut bar = Bar::new(client, config, Recents::new(None), theme);
+    // Never dropped: the process ends right after, and freeing thousands of
+    // rows one by one would only delay the exit (Bar owns nothing to flush).
+    let mut bar = std::mem::ManuallyDrop::new(Bar::new(client, config, Recents::new(None), theme));
     std::mem::swap(&mut bar.recents, &mut recents);
     if let Err(error) = bar.bootstrap(pool, answer) {
         return fail(&error.message);

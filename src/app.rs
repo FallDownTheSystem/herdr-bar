@@ -876,7 +876,7 @@ impl Bar {
             return;
         }
         let pids: Vec<Option<Value>> =
-            panes.iter().map(|pane_id| self.client.process_info(pane_id).ok().and_then(|info| pid_for(&info))).collect();
+            self.client.process_infos(&panes).into_iter().map(|info| info.ok().and_then(|info| pid_for(&info))).collect();
         let readings = elapsed_seconds_many(&pids);
         for (pane_id, seconds) in panes.into_iter().zip(readings) {
             // A pane that cannot be dated is remembered as such: one failed
@@ -1159,9 +1159,10 @@ impl Bar {
     fn next_timeout(&self, escape_deadline: Option<f64>) -> f64 {
         let now = monotonic();
         if !self.age_queue.is_empty() {
-            // Readings outstanding: come straight back for the next one, so a
-            // freshly drawn list fills in its times inside a few frames.
-            return 0.01;
+            // Readings outstanding: come straight back for them, so a freshly
+            // drawn list fills in its times in the next frame. A zero wait
+            // still takes any input that is already waiting first.
+            return 0.0;
         }
         let mut deadline = self.last_refresh + self.config.refresh_ms as f64 / 1000.0;
         if let Some((_, due)) = &self.preview_pending {
