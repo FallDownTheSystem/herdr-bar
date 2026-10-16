@@ -1,11 +1,11 @@
 # Changelog
 
-## Unreleased
+## 0.8.0
 
-- Run on Windows (#7). The bar draws on the Windows console, talks to Herdr
-  over the named pipe behind `HERDR_SOCKET_PATH` with the same timeouts as the
-  Unix socket, and reads running times from the kernel. Task titles and tab
-  status run in the same detached watcher; on Windows it polls every two
+- Run on Windows (#7, #12). The bar draws on the Windows console, talks to
+  Herdr over the named pipe behind `HERDR_SOCKET_PATH` with the same timeouts
+  as the Unix socket, and reads running times from the kernel. Task titles and
+  tab status run in the same detached watcher; on Windows it polls every two
   seconds instead of following an event stream.
 - Skip a Windows console's default title, the path of the program that opened
   it, when naming a tab. Codex panes keep that title until Codex sets one.
@@ -13,6 +13,9 @@
   no `sh`, and Herdr rejects a second `open` action even with a different
   `platforms` list. The open path imports nothing beyond the CLI call. On
   Linux and macOS, `open` keeps its `sh -c` one-liner and its startup cost.
+- Add `running_time` (default `true`) to hide the per-row running time (#11).
+  `false` also skips the `pane.process_info` and `ps` reads behind it, so the
+  bar opens faster in sessions with many panes.
 
 ## 0.7.3
 
