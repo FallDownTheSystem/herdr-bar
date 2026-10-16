@@ -34,7 +34,6 @@ import stat
 import subprocess
 import sys
 import tempfile
-import threading
 import time
 import unicodedata
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
@@ -44,6 +43,7 @@ sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(ROOT, "scripts"))
 
 from bench_process import FakeHerdr, Session, bulk_snapshot  # noqa: E402
+
 from tests.fixtures import PREVIEW_TEXT, snapshot  # noqa: E402
 
 PYTHON_CMD = [sys.executable, os.path.join(ROOT, "run.py")]
@@ -186,7 +186,8 @@ class Machine(object):
             self.watcher_dir().mkdir(parents=True, exist_ok=True)
             (self.watcher_dir() / "title-watcher.stopped").touch()
         for relative, content in (files or {}).items():
-            path = os.path.join(self.state_dir, relative.replace("{watcher}", str(self.watcher_dir())))
+            relative = relative.replace("{watcher}", str(self.watcher_dir()))
+            path = os.path.join(self.state_dir, relative)
             os.makedirs(os.path.dirname(path), exist_ok=True)
             with open(path, "w") as handle:
                 handle.write(content if isinstance(content, str) else json.dumps(content))
@@ -198,7 +199,7 @@ class Machine(object):
 
     def env(self) -> Dict[str, str]:
         return {
-            "PATH": self.bin_dir + os.pathsep + os.environ.get("PATH", "/usr/bin:/bin"),
+            "PATH": os.pathsep.join([self.bin_dir, os.environ.get("PATH", "/usr/bin:/bin")]),
             "HOME": self.home,
             "TERM": "xterm-256color",
             "LANG": "C.UTF-8",
@@ -216,8 +217,8 @@ class Machine(object):
             for name in sorted(names):
                 path = os.path.join(directory, name)
                 relative = os.path.relpath(path, self.state_dir)
-                relative = relative.replace(os.path.relpath(str(self.watcher_dir()), self.state_dir),
-                                            "{watcher}")
+                watcher = os.path.relpath(str(self.watcher_dir()), self.state_dir)
+                relative = relative.replace(watcher, "{watcher}")
                 with open(path, "rb") as handle:
                     raw = handle.read()
                 text = raw.decode("utf-8", "replace")
@@ -398,7 +399,6 @@ class Screen(object):
     def dump(self) -> List[str]:
         """Each row as its text, then its style runs."""
         out = []
-        styles: Dict[Tuple, str] = {}
         for row in self.cells:
             text = "".join(char for char, _ in row)
             runs = []
