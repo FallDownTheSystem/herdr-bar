@@ -120,7 +120,7 @@ class InstallShTest(unittest.TestCase):
         result = self.run_install()
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("download failed", result.stderr)
-        self.assertIn("herdr plugin install jeffarese/herdr-bar", result.stderr)
+        self.assertIn("herdr plugin install FallDownTheSystem/herdr-bar --ref windows-support", result.stderr)
         self.assertFalse(os.path.exists(self.target()))
 
     def test_wrong_version_fails(self):
