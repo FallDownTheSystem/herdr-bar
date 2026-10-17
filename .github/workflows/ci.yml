@@ -96,6 +96,22 @@ jobs:
         run: cargo test --release --locked
       - name: Build
         run: cargo build --release --locked
+      # The Python job runs without bin/, so run.py never hands its watcher
+      # test to the binary there. Install the binary where the plugin keeps
+      # it and run that test as a real detached process against a fake
+      # Herdr: unit tests cannot catch a lock or spawn that only fails across
+      # processes on one platform.
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.13"
+      - name: Watcher process on the binary
+        shell: bash
+        run: |
+          mkdir -p bin
+          cp "target/release/herdr-bar${{ runner.os == 'Windows' && '.exe' || '' }}" bin/
+          python -m unittest tests.test_title_watcher.WatcherProcessTest
+        env:
+          PYTHONPATH: src
 
   # Cargo.toml's rust-version: the oldest toolchain a source install
   # (scripts/install.sh's cargo fallback) is promised to work with.

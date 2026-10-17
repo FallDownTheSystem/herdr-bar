@@ -692,7 +692,7 @@ impl AutoTitles {
 
     fn persisted_apply(&mut self, client: &mut TabStatus, snapshot: Shared, state_dir: &Path) -> Result<Shared> {
         std::fs::create_dir_all(state_dir)?;
-        let lock = std::fs::OpenOptions::new().append(true).create(true).open(state_dir.join("auto-titles.lock"))?;
+        let lock = host::open_lock(&state_dir.join("auto-titles.lock"))?;
         if let Err(error) = host::lock(&lock, false) {
             if host::is_busy(&error) {
                 return Ok(snapshot);

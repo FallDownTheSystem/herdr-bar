@@ -25,6 +25,10 @@ fn open_append(path: &Path) -> std::result::Result<File, String> {
     OpenOptions::new().append(true).create(true).open(path).map_err(|e| host::os_error_path(&e, path))
 }
 
+fn open_lock(path: &Path) -> std::result::Result<File, String> {
+    host::open_lock(path).map_err(|e| host::os_error_path(&e, path))
+}
+
 fn mkdir(path: &Path) -> std::result::Result<(), String> {
     std::fs::create_dir_all(path).map_err(|e| host::os_error_path(&e, path))
 }
@@ -137,7 +141,7 @@ pub fn start(resume: bool) {
     let attempt = (|| -> std::result::Result<(), String> {
         mkdir(&directory)?;
         let gate_path = directory.join("title-launch.lock");
-        let gate = open_append(&gate_path)?;
+        let gate = open_lock(&gate_path)?;
         if let Err(error) = host::lock(&gate, resume) {
             if host::is_busy(&error) {
                 return Ok(());
@@ -162,7 +166,7 @@ fn launch(directory: &Path, resume: bool) -> std::result::Result<(), String> {
     } else if stopped.exists() {
         return Ok(());
     }
-    let lock = open_append(&directory.join("title-watcher.lock"))?;
+    let lock = open_lock(&directory.join("title-watcher.lock"))?;
     if let Err(error) = host::lock(&lock, false) {
         if host::is_busy(&error) {
             return Ok(());
@@ -260,7 +264,7 @@ fn finish_if_stopped(lock: &mut Option<File>, directory: &Path, tabs: Option<&mu
     if !stopped.exists() {
         return false;
     }
-    let Ok(gate) = OpenOptions::new().append(true).create(true).open(directory.join("title-launch.lock")) else {
+    let Ok(gate) = host::open_lock(&directory.join("title-launch.lock")) else {
         return false;
     };
     if host::lock(&gate, true).is_err() {
@@ -398,7 +402,7 @@ fn replace(root: &Path, lock: &mut Option<File>, directory: &Path) -> Result<()>
 /// Take the worker lock by name; None when another worker holds it.
 fn claim(directory: &Path) -> std::result::Result<Option<File>, String> {
     mkdir(directory)?;
-    let lock = open_append(&directory.join("title-watcher.lock"))?;
+    let lock = open_lock(&directory.join("title-watcher.lock"))?;
     match host::lock(&lock, false) {
         Ok(()) => Ok(Some(lock)),
         Err(error) if host::is_busy(&error) => Ok(None),
@@ -612,6 +616,18 @@ mod tests {
         let names: Vec<_> = std::fs::read_dir(&state).unwrap().flatten().map(|e| e.path()).collect();
         assert_eq!(names, vec![second]);
         assert!(staged_binary(&base.join("missing"), &state).is_err());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn claim_is_exclusive_until_released() {
+        let base = std::env::temp_dir().join(format!("herdr-bar-claim-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let first = claim(&base).unwrap();
+        assert!(first.is_some(), "a free lock must be claimed");
+        assert!(claim(&base).unwrap().is_none(), "a held lock must read as busy");
+        drop(first);
+        assert!(claim(&base).unwrap().is_some(), "a released lock must be claimable");
         let _ = std::fs::remove_dir_all(&base);
     }
 

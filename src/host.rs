@@ -50,12 +50,24 @@ pub fn os_error_path(error: &io::Error, path: &std::path::Path) -> String {
 
 // -- locks -------------------------------------------------------------------
 
-/// Take an exclusive lock on an open file; `WouldBlock` when busy.
+/// Open, creating if needed, a file to pass to `lock`.
+///
+/// Windows refuses LockFileEx on a handle without read or write access, and
+/// `append(true)` alone grants neither, only FILE_APPEND_DATA. Every lock
+/// file is opened here so that no caller can pick an access mode that locks
+/// on POSIX but fails on Windows.
+pub fn open_lock(path: &std::path::Path) -> io::Result<File> {
+    std::fs::OpenOptions::new().write(true).create(true).truncate(false).open(path)
+}
+
+/// Take an exclusive lock on a file from `open_lock`; `WouldBlock` when busy.
 ///
 /// The lock lasts as long as the handle: closing the file releases it. POSIX
 /// uses flock(2). Windows locks the first byte of the file, which conflicts
 /// between processes and between two handles of one process just like flock
-/// does, and with what the Python release's msvcrt.locking took.
+/// does, and with what the Python release's msvcrt.locking took. Any other
+/// failure is returned as itself, so a caller never mistakes it for another
+/// holder and a blocking caller never waits on it forever.
 #[cfg(unix)]
 pub fn lock(file: &File, blocking: bool) -> io::Result<()> {
     use std::os::unix::io::AsRawFd;
@@ -83,6 +95,7 @@ pub fn unlock(file: &File) {
 #[cfg(windows)]
 pub fn lock(file: &File, blocking: bool) -> io::Result<()> {
     use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::ERROR_LOCK_VIOLATION;
     use windows_sys::Win32::Storage::FileSystem::{LockFileEx, LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY};
     use windows_sys::Win32::System::IO::OVERLAPPED;
     loop {
@@ -101,6 +114,9 @@ pub fn lock(file: &File, blocking: bool) -> io::Result<()> {
             return Ok(());
         }
         let error = io::Error::last_os_error();
+        if error.raw_os_error() != Some(ERROR_LOCK_VIOLATION as i32) {
+            return Err(error);
+        }
         if !blocking {
             return Err(io::Error::new(io::ErrorKind::WouldBlock, error));
         }
@@ -422,5 +438,24 @@ pub fn process_age(pid: i128) -> Option<f64> {
     let value = |t: FILETIME| (t.dwLowDateTime as u64 | ((t.dwHighDateTime as u64) << 32)) as i128;
     // FILETIME counts 100-nanosecond intervals.
     Some(((value(now) - value(created)) as f64 / 1e7).max(0.0))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn a_lock_failure_other_than_a_holder_is_not_busy() {
+        let path = std::env::temp_dir().join(format!("herdr-bar-lock-{}", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        // An append-only handle cannot be locked on Windows at all.
+        let append = std::fs::OpenOptions::new().append(true).create(true).open(&path).unwrap();
+        let error = lock(&append, false).unwrap_err();
+        assert!(!is_busy(&error), "access denied must not read as another holder: {error}");
+        assert!(lock(&append, true).is_err(), "a blocking lock must not retry a non-conflict");
+        drop(append);
+        let _ = std::fs::remove_file(&path);
+    }
 }
 
