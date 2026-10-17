@@ -6,11 +6,12 @@
   (`bin/herdr-bar.exe` on Windows) instead of Python. It is a drop-in
   replacement: a parity harness drives both on a pty against a fake Herdr
   and a differential fuzzer checks the pure functions against Python.
-- Install the binary through a manifest build step. On install and update,
-  Herdr runs `scripts/install.sh` (`scripts/install.ps1` on Windows), which
-  downloads the release binary for this version and platform, checks it
-  against the release's `SHA256SUMS`, and falls back to
-  `cargo build --release`. Set `HERDR_BAR_BUILD=source` to skip the download.
+- Install the binary through a manifest build step. On install (updating is
+  reinstalling), Herdr runs `scripts/install.sh` (`scripts/install.ps1` on
+  Windows), which downloads the release binary for this version and platform,
+  checks it against the release's `SHA256SUMS` and its reported version, and
+  falls back to `cargo build --release` (Rust 1.88+). Set
+  `HERDR_BAR_BUILD=source` to skip the download.
 - Open faster and type faster on big sessions. At 2,000 rows, the first
   frame drops from about 140 ms to about 24 ms and a keystroke p99 from
   about 295 ms to about 10 ms.

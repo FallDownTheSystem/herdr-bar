@@ -475,7 +475,8 @@ impl<'a> Parser<'a> {
     /// or that the pass cannot close, go the ordinary way.
     fn split_array(&mut self) -> Option<Result<Vec<Value>, ParseError>> {
         let open = self.at;
-        let mut level = 0usize;
+        // Closers seen so far, so that `[ ... }` or `[{ ... ]}` cannot close.
+        let mut open_brackets: Vec<u8> = Vec::new();
         let mut in_string = false;
         let mut escaped = false;
         let mut cuts: Vec<usize> = vec![open];
@@ -493,15 +494,19 @@ impl<'a> Parser<'a> {
             }
             match b {
                 b'"' => in_string = true,
-                b'[' | b'{' => level += 1,
+                b'[' => open_brackets.push(b']'),
+                b'{' => open_brackets.push(b'}'),
                 b']' | b'}' => {
-                    level -= 1;
-                    if level == 0 {
+                    if open_brackets.pop() != Some(b) {
+                        // Mismatched: the sequential parser reports it.
+                        return None;
+                    }
+                    if open_brackets.is_empty() {
                         close = Some(open + index);
                         break;
                     }
                 }
-                b',' if level == 1 => cuts.push(open + index),
+                b',' if open_brackets.len() == 1 => cuts.push(open + index),
                 _ => {}
             }
         }
@@ -865,6 +870,9 @@ mod tests {
             format!("{},]", &good[..good.len() - 1]),
             good[..good.len() - 2].to_string(),
             good.replacen("\"e\": []}", "\"e\": []} 7", 1),
+            format!("{}}}", &good[..good.len() - 1]),
+            good.replacen("\"d\": {}", "\"d\": {]", 1),
+            good.replacen("\"e\": []}", "\"e\": [}}", 1),
         ];
         for text in broken {
             assert!(loads(&text).is_err());
@@ -872,6 +880,8 @@ mod tests {
     }
 
     #[test]
+    // 2215847513417901.25 is exact in an f64; the lint misjudges it.
+    #[allow(clippy::excessive_precision)]
     fn floats() {
         assert_eq!(float_repr(1.0), "1.0");
         assert_eq!(float_repr(1e16), "1e+16");

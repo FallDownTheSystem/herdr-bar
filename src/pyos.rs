@@ -74,13 +74,22 @@ pub fn home() -> Option<String> {
 
 #[cfg(not(windows))]
 fn passwd_home() -> Option<String> {
-    unsafe {
-        let entry = libc::getpwuid(libc::getuid());
-        if entry.is_null() || (*entry).pw_dir.is_null() {
+    // getpwuid_r: this runs on worker threads, where getpwuid is unsafe.
+    let mut size = 1024usize;
+    loop {
+        let mut buffer = vec![0 as libc::c_char; size];
+        let mut entry: libc::passwd = unsafe { std::mem::zeroed() };
+        let mut found: *mut libc::passwd = std::ptr::null_mut();
+        let code = unsafe { libc::getpwuid_r(libc::getuid(), &mut entry, buffer.as_mut_ptr(), size, &mut found) };
+        if code == libc::ERANGE && size < 1 << 20 {
+            size *= 2;
+            continue;
+        }
+        if code != 0 || found.is_null() || entry.pw_dir.is_null() {
             return None;
         }
-        let dir = std::ffi::CStr::from_ptr((*entry).pw_dir);
-        Some(dir.to_string_lossy().into_owned())
+        let dir = unsafe { std::ffi::CStr::from_ptr(entry.pw_dir) };
+        return Some(dir.to_string_lossy().into_owned());
     }
 }
 

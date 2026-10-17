@@ -11,6 +11,10 @@ name: release
 on:
   push:
     tags: ["v*"]
+    branches: [main]
+  # Pull requests and main build every asset but publish nothing, so a broken
+  # cross target shows up before the tag does.
+  pull_request:
   workflow_dispatch:
     inputs:
       tag:
@@ -18,15 +22,56 @@ on:
         required: true
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+  cancel-in-progress: false
 
 env:
   TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  RELEASING: ${{ startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch' }}
 
 jobs:
+  # The downloader fetches v<manifest version>, so a tag that disagrees with
+  # any of the version sources would publish binaries nobody can install.
+  versions:
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ env.TAG }}
+          persist-credentials: false
+      - name: Tag matches every version source
+        run: |
+          python3 - <<'PY'
+          import os, re, sys
+          def grab(path, pattern):
+              with open(path, encoding="utf-8") as handle:
+                  match = re.search(pattern, handle.read(), re.M)
+              return match.group(1) if match else None
+          found = {
+              "tag": os.environ["TAG"],
+              "herdr-plugin.toml": "v%s" % grab("herdr-plugin.toml", r'^version\s*=\s*"([^"]+)"'),
+              "Cargo.toml": "v%s" % grab("Cargo.toml", r'^version\s*=\s*"([^"]+)"'),
+              "src/cli.rs": "v%s" % grab("src/cli.rs", r'^pub const VERSION: &str = "([^"]+)"'),
+              "src/herdr_bar/__init__.py": "v%s" % grab("src/herdr_bar/__init__.py", r'^__version__\s*=\s*"([^"]+)"'),
+          }
+          for source, value in found.items():
+              print("%-28s %s" % (source, value))
+          if len(set(found.values())) != 1:
+              sys.exit("version mismatch: the tag and every version source must agree")
+          PY
+
   build:
+    needs: versions
+    # Run when versions passed, or when it was skipped because nothing is released.
+    if: ${{ !cancelled() && (needs.versions.result == 'success' || needs.versions.result == 'skipped') }}
     name: build ${{ matrix.asset }}
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -53,28 +98,37 @@ jobs:
             runner: windows-latest
             asset: herdr-bar-windows-aarch64.exe
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          ref: ${{ env.TAG }}
-      - uses: dtolnay/rust-toolchain@stable
+          ref: ${{ env.RELEASING == 'true' && env.TAG || github.sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
+          toolchain: 1.99.1
           targets: ${{ matrix.target }}
       - name: Build
-        run: cargo build --release --locked --target ${{ matrix.target }}
+        env:
+          TARGET: ${{ matrix.target }}
+        run: cargo build --release --locked --target "$TARGET"
       - name: Stage asset
         shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          ASSET: ${{ matrix.asset }}
         run: |
           mkdir -p dist
           suffix=""
-          case "${{ matrix.target }}" in *windows*) suffix=".exe" ;; esac
-          cp "target/${{ matrix.target }}/release/herdr-bar${suffix}" "dist/${{ matrix.asset }}"
+          case "$TARGET" in *windows*) suffix=".exe" ;; esac
+          cp "target/$TARGET/release/herdr-bar${suffix}" "dist/$ASSET"
           ls -l dist
       - name: Check static linkage
         if: contains(matrix.target, 'linux-musl')
+        env:
+          ASSET: ${{ matrix.asset }}
         run: |
-          file "dist/${{ matrix.asset }}"
-          file "dist/${{ matrix.asset }}" | grep -Eq 'statically linked|static-pie linked'
-      - uses: actions/upload-artifact@v7
+          file "dist/$ASSET"
+          file "dist/$ASSET" | grep -Eq 'statically linked|static-pie linked'
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: ${{ matrix.asset }}
           path: dist/${{ matrix.asset }}
@@ -82,9 +136,13 @@ jobs:
 
   publish:
     needs: build
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
     steps:
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
           path: dist
           merge-multiple: true
@@ -97,12 +155,21 @@ jobs:
           done
           sha256sum $expected > SHA256SUMS
           cat SHA256SUMS
+      # Draft first, upload everything, then publish, so nobody downloads a
+      # half-filled release. A published release's assets are never replaced;
+      # a draft left by a failed run is refilled.
       - name: Upload to release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          if ! gh release view "$TAG" >/dev/null 2>&1; then
-            gh release create "$TAG" --verify-tag --title "$TAG" --generate-notes
+          if draft=$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null); then
+            if [ "$draft" != true ]; then
+              echo "release $TAG is already published; refusing to replace its assets" >&2
+              exit 1
+            fi
+          else
+            gh release create "$TAG" --verify-tag --draft --title "$TAG" --generate-notes
           fi
           gh release upload "$TAG" dist/* --clobber
+          gh release edit "$TAG" --draft=false

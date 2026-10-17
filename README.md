@@ -64,7 +64,7 @@ Linux or Windows, x86_64 or ARM. Herdr refuses to install the plugin on anything
 older, so there is nothing to get wrong. Installing runs the plugin's build
 step, which downloads the release binary for your platform and checks it
 against the release's `SHA256SUMS`; if that fails, it builds from source with
-`cargo` instead. Set `HERDR_BAR_BUILD=source` to always build from source.
+`cargo` instead (Rust 1.88+). Set `HERDR_BAR_BUILD=source` to always build from source.
 
 **Windows.** Bind `command = "herdr-bar.open-windows"` instead of
 `herdr-bar.open`: `open` is a shell one-liner, and Windows has no `sh`.
@@ -420,7 +420,7 @@ in the server's state subdirectory. Tab titles themselves are stored by Herdr.
 ```bash
 git clone https://github.com/jeffarese/herdr-bar
 cd herdr-bar
-sh scripts/install.sh       # or: HERDR_BAR_BUILD=source sh scripts/install.sh
+HERDR_BAR_BUILD=source sh scripts/install.sh   # build this clone (Rust 1.88+)
 herdr plugin link .         # link never runs the build step, so build first
 
 cargo test --release                            # the Rust unit tests

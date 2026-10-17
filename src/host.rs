@@ -137,17 +137,66 @@ pub fn detach(command: &mut Command, lock_file: &File) {
     use std::os::unix::io::AsRawFd;
     use std::os::unix::process::CommandExt;
     let fd = lock_file.as_raw_fd();
+    let limit = fd_limit();
     unsafe {
         command.pre_exec(move || {
             if libc::setsid() < 0 {
                 return Err(io::Error::last_os_error());
             }
+            // As Python's close_fds: the worker keeps stdio and the lock only.
+            cloexec_all_except(fd, limit);
             let flags = libc::fcntl(fd, libc::F_GETFD);
             if flags < 0 || libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
                 return Err(io::Error::last_os_error());
             }
             Ok(())
         });
+    }
+}
+
+/// One past the highest descriptor to look at; computed before any fork.
+#[cfg(unix)]
+pub fn fd_limit() -> i32 {
+    let mut limit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+    let soft = if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } == 0 {
+        limit.rlim_cur
+    } else {
+        1024
+    };
+    // An unlimited soft limit would make the fallback loop endless.
+    soft.clamp(256, 65_536) as i32
+}
+
+/// Mark every descriptor from 3 up as close-on-exec, except `keep`.
+///
+/// Async-signal-safe: no allocation, only fcntl (or close_range on Linux),
+/// so it may run between fork and exec. Marking rather than closing keeps
+/// std's own exec-error pipe working.
+#[cfg(unix)]
+pub fn cloexec_all_except(keep: i32, limit: i32) {
+    #[cfg(target_os = "linux")]
+    unsafe {
+        const CLOSE_RANGE_CLOEXEC: libc::c_uint = 1 << 2;
+        let mut ok = true;
+        if keep > 3 {
+            ok &= libc::syscall(libc::SYS_close_range, 3 as libc::c_uint, (keep - 1) as libc::c_uint, CLOSE_RANGE_CLOEXEC) == 0;
+        }
+        let from = if keep >= 3 { keep + 1 } else { 3 };
+        ok = ok && libc::syscall(libc::SYS_close_range, from as libc::c_uint, libc::c_uint::MAX, CLOSE_RANGE_CLOEXEC) == 0;
+        if ok {
+            return;
+        }
+    }
+    for fd in 3..limit {
+        if fd == keep {
+            continue;
+        }
+        unsafe {
+            let flags = libc::fcntl(fd, libc::F_GETFD);
+            if flags >= 0 && flags & libc::FD_CLOEXEC == 0 {
+                libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC);
+            }
+        }
     }
 }
 

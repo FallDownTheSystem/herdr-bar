@@ -1,10 +1,10 @@
 # Put the herdr-bar binary at bin\herdr-bar.exe for this checkout.
 #
 # Herdr runs this as the plugin's Windows [[build]] step on `herdr plugin
-# install` and `herdr plugin update` (not on `plugin link`: run it yourself for
-# a local checkout). It downloads the prebuilt binary of the manifest's version
+# install` (updating is reinstalling; `plugin link` never runs it: run it
+# yourself for a local checkout). It downloads the prebuilt binary of the manifest's version
 # from the GitHub release, checks it against the release's SHA256SUMS, and
-# falls back to `cargo build --release` when there is no binary for this
+# falls back to `cargo build --release` (Rust 1.88+) when there is no binary for this
 # machine or the download or the check fails.
 #
 #   HERDR_BAR_BUILD=source     skip the download and build with cargo
@@ -52,14 +52,72 @@ function Get-AssetName {
     }
 }
 
-# Replace in one rename, so a running watcher never sees half a binary.
+# Run a native command without PowerShell 5.1 turning its stderr output into a
+# terminating NativeCommandError under $ErrorActionPreference = 'Stop'.
+# Returns the exit code; stdout goes to $script:NativeOutput.
+function Invoke-Native([string]$Command, [string[]]$Arguments, [switch]$ShowOutput) {
+    $Saved = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        if ($ShowOutput) {
+            & $Command @Arguments 2>&1 | ForEach-Object { [Console]::Error.WriteLine("$_") }
+            $script:NativeOutput = ''
+        } else {
+            $script:NativeOutput = (& $Command @Arguments 2>$null | Out-String).Trim()
+        }
+        return $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $Saved
+    }
+}
+
+# Windows cannot overwrite a running .exe but can rename it, so an existing
+# binary is moved aside to <name>.old.<pid> before the new one is renamed in.
+# The .exe and the extensionless alias are staged first, then swapped, and a
+# failed swap restores whatever was moved aside.
 function Install-Binary([string]$Source) {
     New-Item -ItemType Directory -Force -Path $BinDir | Out-Null
-    foreach ($Destination in @($Target, $Alias)) {
-        $Temp = "$Destination.tmp.$PID"
-        Copy-Item -LiteralPath $Source -Destination $Temp -Force
-        Move-Item -LiteralPath $Temp -Destination $Destination -Force
+    foreach ($Stale in @(Get-ChildItem -LiteralPath $BinDir -Filter 'herdr-bar*.old.*' -ErrorAction SilentlyContinue)) {
+        Remove-Item -LiteralPath $Stale.FullName -Force -ErrorAction SilentlyContinue
     }
+    $Pairs = @()
+    try {
+        foreach ($Destination in @($Target, $Alias)) {
+            $Temp = "$Destination.tmp.$PID"
+            Copy-Item -LiteralPath $Source -Destination $Temp -Force
+            $Pairs += ,@($Destination, $Temp, "$Destination.old.$PID")
+        }
+    } catch {
+        foreach ($Pair in $Pairs) { Remove-Item -LiteralPath $Pair[1] -Force -ErrorAction SilentlyContinue }
+        throw
+    }
+    $Done = @()
+    try {
+        foreach ($Pair in $Pairs) {
+            if (Test-Path -LiteralPath $Pair[0]) {
+                Move-Item -LiteralPath $Pair[0] -Destination $Pair[2] -Force
+            }
+            Move-Item -LiteralPath $Pair[1] -Destination $Pair[0] -Force
+            $Done += ,$Pair
+        }
+    } catch {
+        foreach ($Pair in $Pairs) {
+            Remove-Item -LiteralPath $Pair[1] -Force -ErrorAction SilentlyContinue
+            if (Test-Path -LiteralPath $Pair[2]) {
+                $IsDone = @($Done | Where-Object { $_[0] -eq $Pair[0] }).Count -gt 0
+                if ($IsDone) {
+                    Remove-Item -LiteralPath $Pair[0] -Force -ErrorAction SilentlyContinue
+                }
+                if (-not (Test-Path -LiteralPath $Pair[0])) {
+                    Move-Item -LiteralPath $Pair[2] -Destination $Pair[0] -Force -ErrorAction SilentlyContinue
+                }
+            }
+        }
+        throw
+    }
+    # The old copies may still be running; deleting them is best-effort and
+    # the next install retries.
+    foreach ($Pair in $Pairs) { Remove-Item -LiteralPath $Pair[2] -Force -ErrorAction SilentlyContinue }
 }
 
 function Invoke-Download {
@@ -70,6 +128,7 @@ function Invoke-Download {
     }
     $Base = $env:HERDR_BAR_DOWNLOAD_BASE
     if (-not $Base) { $Base = "$RepoUrl/releases/download/v$Version" }
+    if ($Base -notmatch '^(https|file)://') { Say "warning: HERDR_BAR_DOWNLOAD_BASE is not https: $Base" }
     $Temp = Join-Path ([System.IO.Path]::GetTempPath()) ("herdr-bar-" + [System.Guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $Temp | Out-Null
     try {
@@ -82,8 +141,8 @@ function Invoke-Download {
         $File = Join-Path $Temp $Asset
         $Sums = Join-Path $Temp 'SHA256SUMS'
         try {
-            Invoke-WebRequest -UseBasicParsing -Uri "$Base/$Asset" -OutFile $File
-            Invoke-WebRequest -UseBasicParsing -Uri "$Base/SHA256SUMS" -OutFile $Sums
+            Invoke-WebRequest -UseBasicParsing -TimeoutSec 300 -Uri "$Base/$Asset" -OutFile $File
+            Invoke-WebRequest -UseBasicParsing -TimeoutSec 300 -Uri "$Base/SHA256SUMS" -OutFile $Sums
         } catch {
             Say "download failed: $($_.Exception.Message)"
             return $false
@@ -105,12 +164,25 @@ function Invoke-Download {
             Say "checksum mismatch for $Asset (expected $Expected, got $Actual)"
             return $false
         }
-        & $File --version *> $null
-        if ($LASTEXITCODE -ne 0) {
-            Say "the downloaded $Asset does not run on this machine"
-            return $false
+        # Run it from bin\ rather than %TEMP%, which AppLocker or similar
+        # policies may block, and only keep it if it reports this version.
+        New-Item -ItemType Directory -Force -Path $BinDir | Out-Null
+        $Check = Join-Path $BinDir ".herdr-bar.check.$PID.exe"
+        Copy-Item -LiteralPath $File -Destination $Check -Force
+        try {
+            $Code = Invoke-Native $Check @('--version')
+            if ($Code -ne 0) {
+                Say "the downloaded $Asset does not run on this machine"
+                return $false
+            }
+            if ($script:NativeOutput -ne "herdr-bar $Version") {
+                Say "downloaded binary reports '$($script:NativeOutput)', expected 'herdr-bar $Version'"
+                return $false
+            }
+            Install-Binary $Check
+        } finally {
+            Remove-Item -LiteralPath $Check -Force -ErrorAction SilentlyContinue
         }
-        Install-Binary $File
         return $true
     } catch {
         Say "download failed: $($_.Exception.Message)"
@@ -122,15 +194,19 @@ function Invoke-Download {
 
 function Invoke-SourceBuild {
     if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
-        Say 'cargo is not installed'
+        Say 'cargo is not installed (building herdr-bar needs Rust 1.88 or newer)'
         return $false
     }
     Say 'building from source with cargo'
     $CargoArgs = @('build', '--release')
     if (Test-Path -LiteralPath (Join-Path $Root 'Cargo.lock')) { $CargoArgs += '--locked' }
     try {
-        & cargo @CargoArgs | Out-Host
-        if ($LASTEXITCODE -ne 0) { return $false }
+        # target\ is left in place: in a development clone it is the build cache.
+        $Code = Invoke-Native 'cargo' $CargoArgs -ShowOutput
+        if ($Code -ne 0) {
+            Say "cargo build failed (exit $Code; herdr-bar needs Rust 1.88 or newer)"
+            return $false
+        }
         Install-Binary (Join-Path $Root 'target\release\herdr-bar.exe')
         return $true
     } catch {
@@ -148,7 +224,7 @@ if (Invoke-SourceBuild) {
     exit 0
 }
 Say "could not install herdr-bar ${Version}: no prebuilt binary could be downloaded"
-Say 'and building from source failed. Install Rust (https://rustup.rs) and run'
-Say '  powershell -NoProfile -ExecutionPolicy Bypass -File scripts\install.ps1'
-Say "in $Root, or reinstall the plugin."
+Say 'and building from source failed. Install Rust 1.88 or newer'
+Say '(https://rustup.rs), then reinstall the plugin:'
+Say '  herdr plugin install jeffarese/herdr-bar'
 exit 1

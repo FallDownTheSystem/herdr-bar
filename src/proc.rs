@@ -25,20 +25,24 @@ pub fn run(argv: &[String], timeout: f64) -> Result<Output, RunError> {
     let mut stderr = child.stderr.take();
     // Drain stderr on a thread so a chatty program cannot fill the pipe and
     // stall while we read stdout.
-    let err_thread = std::thread::spawn(move || {
+    // A grandchild may keep the pipes open after the child exits, so the
+    // readers report over channels and are abandoned at the deadline.
+    let (err_send, err_recv) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
         let mut buffer = Vec::new();
         if let Some(pipe) = stderr.as_mut() {
             let _ = pipe.read_to_end(&mut buffer);
         }
-        buffer
+        let _ = err_send.send(buffer);
     });
     let deadline = Instant::now() + Duration::from_secs_f64(timeout.max(0.0));
-    let out_thread = std::thread::spawn(move || {
+    let (out_send, out_recv) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
         let mut buffer = Vec::new();
         if let Some(pipe) = stdout.as_mut() {
             let _ = pipe.read_to_end(&mut buffer);
         }
-        buffer
+        let _ = out_send.send(buffer);
     });
     let exit = ExitWatch::new(&child);
     let status = loop {
@@ -55,8 +59,16 @@ pub fn run(argv: &[String], timeout: f64) -> Result<Output, RunError> {
         }
         exit.wait(deadline - now);
     };
-    let stdout = out_thread.join().unwrap_or_default();
-    let stderr = err_thread.join().unwrap_or_default();
+    let collect = |receiver: &std::sync::mpsc::Receiver<Vec<u8>>| {
+        let left = deadline.saturating_duration_since(Instant::now());
+        match receiver.recv_timeout(left) {
+            Ok(buffer) => Ok(buffer),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Ok(Vec::new()),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(RunError::Timeout),
+        }
+    };
+    let stdout = collect(&out_recv)?;
+    let stderr = collect(&err_recv)?;
     Ok(Output { stdout, stderr, success: status.map(|s| s.success()).unwrap_or(false) })
 }
 
@@ -105,4 +117,26 @@ impl ExitWatch {
 /// `run`, folding every failure into None.
 pub fn run_capture(argv: &[String], timeout: f64) -> Option<Output> {
     run(argv, timeout).ok()
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deadline_holds_when_a_grandchild_keeps_the_pipe() {
+        let argv: Vec<String> = ["sh", "-c", "sleep 5 & echo hi"].iter().map(|s| s.to_string()).collect();
+        let started = Instant::now();
+        assert!(matches!(run(&argv, 0.5), Err(RunError::Timeout)));
+        assert!(started.elapsed() < Duration::from_secs(3));
+    }
+
+    #[test]
+    fn output_is_collected() {
+        let argv: Vec<String> = ["sh", "-c", "echo hi; echo err >&2"].iter().map(|s| s.to_string()).collect();
+        let Ok(output) = run(&argv, 5.0) else { panic!("run failed") };
+        assert_eq!(output.stdout, b"hi\n");
+        assert_eq!(output.stderr, b"err\n");
+        assert!(output.success);
+    }
 }

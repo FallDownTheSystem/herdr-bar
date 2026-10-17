@@ -29,9 +29,18 @@ fn mkdir(path: &Path) -> std::result::Result<(), String> {
     std::fs::create_dir_all(path).map_err(|e| host::os_error_path(&e, path))
 }
 
-/// The plugin directory this binary belongs to: the nearest ancestor that
-/// holds the manifest.
+/// The plugin directory this binary belongs to: the one Herdr names in
+/// `HERDR_PLUGIN_ROOT`, else the nearest ancestor that holds the manifest.
+///
+/// The variable comes first so that a binary symlinked from, or copied out
+/// of, another directory still belongs to the plugin that runs it.
 pub fn plugin_root() -> PathBuf {
+    if let Some(root) = std::env::var_os("HERDR_PLUGIN_ROOT").filter(|v| !v.is_empty()) {
+        let root = PathBuf::from(root);
+        if root.join("herdr-plugin.toml").is_file() {
+            return std::fs::canonicalize(&root).unwrap_or(root);
+        }
+    }
     let exe = std::env::current_exe().ok().and_then(|p| std::fs::canonicalize(&p).ok().or(Some(p)));
     if let Some(exe) = exe {
         for ancestor in exe.ancestors().skip(1) {
@@ -44,6 +53,61 @@ pub fn plugin_root() -> PathBuf {
         }
     }
     std::env::current_dir().unwrap_or_default()
+}
+
+/// Whether two plugin roots name the same directory.
+fn same_root(a: &Path, b: &Path) -> bool {
+    if a == b {
+        return true;
+    }
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
+}
+
+/// A copy of `exe` in `directory` to run instead of it, named after its size
+/// and modification time so a changed binary gets a fresh copy.
+///
+/// Windows cannot rename a directory while a process runs an image from it,
+/// so a long-lived worker started from the plugin's own binary would make
+/// every Herdr update of the plugin fail. The copy is written under a temp
+/// name and renamed into place, so a half-written image is never run; older
+/// copies are removed when nothing runs them any more.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn staged_binary(exe: &Path, directory: &Path) -> std::io::Result<PathBuf> {
+    let meta = std::fs::metadata(exe)?;
+    let modified = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let suffix = std::env::consts::EXE_SUFFIX;
+    let name = format!("herdr-bar-{}-{}{}", meta.len(), modified, suffix);
+    let target = directory.join(&name);
+    if !std::fs::metadata(&target).map(|m| m.len() == meta.len()).unwrap_or(false) {
+        let temp = directory.join(format!("{}.{}.tmp", name, std::process::id()));
+        let copied = std::fs::copy(exe, &temp).and_then(|_| std::fs::rename(&temp, &target));
+        if let Err(error) = copied {
+            let _ = std::fs::remove_file(&temp);
+            // A racing launcher may have put the same copy in place.
+            if !target.is_file() {
+                return Err(error);
+            }
+        }
+    }
+    if let Ok(entries) = std::fs::read_dir(directory) {
+        for entry in entries.flatten() {
+            let file = entry.file_name();
+            let file = file.to_string_lossy();
+            if file != name && file.starts_with("herdr-bar-") && file.ends_with(suffix) && !file.ends_with(".tmp") {
+                // Fails while an older worker still runs it; fine.
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+    Ok(target)
 }
 
 /// How to start the watcher shipped in `root`: its binary, wherever the
@@ -111,7 +175,7 @@ fn launch(directory: &Path, resume: bool) -> std::result::Result<(), String> {
         Ok(exe) => vec![exe.into_os_string()],
         Err(_) => entry_point(&plugin_root()),
     };
-    spawn(&command, directory, &log, Some(&lock))
+    spawn(&command, &plugin_root(), directory, &log, Some(&lock))
 }
 
 fn open_log(directory: &Path) -> std::result::Result<File, String> {
@@ -123,7 +187,23 @@ fn open_log(directory: &Path) -> std::result::Result<File, String> {
 /// The worker runs in its state directory, not in the plugin's: Windows does
 /// not let Herdr replace a directory that a running process works in, so a
 /// long-lived worker there would make every plugin update fail.
-fn spawn(command: &[OsString], directory: &Path, log: &File, lock: Option<&File>) -> std::result::Result<(), String> {
+fn spawn(
+    command: &[OsString],
+    root: &Path,
+    directory: &Path,
+    log: &File,
+    lock: Option<&File>,
+) -> std::result::Result<(), String> {
+    #[cfg(windows)]
+    let staged: Vec<OsString> = match command {
+        [exe] => match staged_binary(Path::new(exe), directory) {
+            Ok(copy) => vec![copy.into_os_string()],
+            Err(_) => command.to_vec(),
+        },
+        _ => command.to_vec(),
+    };
+    #[cfg(windows)]
+    let command = &staged[..];
     let token = if host::WINDOWS {
         // CreateProcess cannot hand over a locked handle. Let go so the worker
         // can claim the file by name; a launcher racing into that gap starts a
@@ -137,7 +217,7 @@ fn spawn(command: &[OsString], directory: &Path, log: &File, lock: Option<&File>
     };
     let mut process = Command::new(&command[0]);
     process.args(&command[1..]).arg("--watch-titles").arg(&token);
-    process.current_dir(directory).stdin(Stdio::null());
+    process.current_dir(directory).stdin(Stdio::null()).env("HERDR_PLUGIN_ROOT", root);
     let out = log.try_clone().map_err(|e| host::os_error_str(&e))?;
     let err = log.try_clone().map_err(|e| host::os_error_str(&e))?;
     process.stdout(out).stderr(err);
@@ -149,9 +229,11 @@ fn spawn(command: &[OsString], directory: &Path, log: &File, lock: Option<&File>
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;
+            let limit = host::fd_limit();
             unsafe {
-                process.pre_exec(|| {
+                process.pre_exec(move || {
                     libc::setsid();
+                    host::cloexec_all_except(-1, limit);
                     Ok(())
                 });
             }
@@ -267,7 +349,7 @@ fn revision(root: &Path) -> Result<Revision> {
     }
     let mut out = Vec::new();
     for path in files {
-        let meta = std::fs::metadata(&path).map_err(|e| HerdrError::os(&e))?;
+        let meta = std::fs::metadata(&path).map_err(|e| HerdrError::new(host::os_error_path(&e, &path)))?;
         out.push((path, stamp(&meta), meta.len()));
     }
     Ok(out)
@@ -281,7 +363,7 @@ fn replace(root: &Path, lock: &mut Option<File>, directory: &Path) -> Result<()>
         // claims it; a startup hook racing into the gap loses and exits.
         *lock = None;
         let log = open_log(directory).map_err(HerdrError::new)?;
-        return spawn(&command, directory, &log, None).map_err(HerdrError::new);
+        return spawn(&command, root, directory, &log, None).map_err(HerdrError::new);
     }
     #[cfg(unix)]
     {
@@ -291,13 +373,20 @@ fn replace(root: &Path, lock: &mut Option<File>, directory: &Path) -> Result<()>
         // handoff for a stopped worker, and the replacement cannot race an
         // old writer.
         let fd = lock.as_ref().map(|l| l.as_raw_fd()).unwrap_or(-1);
+        // Nothing else this process holds belongs to the replacement.
+        host::cloexec_all_except(fd, host::fd_limit());
         unsafe {
             let flags = libc::fcntl(fd, libc::F_GETFD);
             if flags >= 0 {
                 libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC);
             }
         }
-        let error = Command::new(&command[0]).args(&command[1..]).arg("--watch-titles").arg(fd.to_string()).exec();
+        let error = Command::new(&command[0])
+            .args(&command[1..])
+            .arg("--watch-titles")
+            .arg(fd.to_string())
+            .env("HERDR_PLUGIN_ROOT", root)
+            .exec();
         Err(HerdrError::os(&error))
     }
     #[cfg(not(unix))]
@@ -373,6 +462,29 @@ pub fn watch(lock_fd: Option<i64>) -> i32 {
     if lock.is_none() {
         return 0;
     }
+    #[cfg(windows)]
+    {
+        // A worker running the plugin's own binary would block Herdr's next
+        // update of the plugin. An 0.8 watcher hands over that way, through
+        // run.py, so move to a copy in the state directory first.
+        let exe = std::env::current_exe().ok();
+        let staged = exe.as_deref().is_some_and(|e| e.parent().is_some_and(|p| same_root(p, &directory)));
+        if let (Some(exe), false) = (exe.as_deref(), staged) {
+            if let Ok(copy) = staged_binary(exe, &directory) {
+                drop(lock.take()); // let the copy claim the lock by name
+                let started = open_log(&directory)
+                    .and_then(|log| spawn(&[copy.into_os_string()], &plugin_root(), &directory, &log, None));
+                if started.is_ok() {
+                    return 0;
+                }
+                // Keep watching from here if the copy cannot start.
+                lock = claim(&directory).ok().flatten();
+                if lock.is_none() {
+                    return 0;
+                }
+            }
+        }
+    }
     let socket_path = client.socket_path.clone();
     let mut tabs = TabStatus::new(AutomaticTabClient::new(client), Some(directory.clone()));
     // Status changes arrive as events, so idle tabs cost no polling beyond titles.
@@ -405,7 +517,8 @@ pub fn watch(lock_fd: Option<i64>) -> i32 {
                     tabs.clear();
                     return Ok(Some(0));
                 };
-                if root != current_root || revision(&root)? != current_revision {
+                // Same directory and same files: nothing to hand over to.
+                if !same_root(&root, &current_root) || revision(&root)? != current_revision {
                     replace(&root, &mut lock, &directory)?;
                     return Ok(Some(0));
                 }
@@ -473,5 +586,40 @@ pub fn watch(lock_fd: Option<i64>) -> i32 {
                 break;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn staged_binary_is_reused_and_replaced() {
+        let base = std::env::temp_dir().join(format!("herdr-bar-stage-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let state = base.join("state");
+        std::fs::create_dir_all(&state).unwrap();
+        let exe = base.join("source");
+        std::fs::write(&exe, b"one").unwrap();
+        let first = staged_binary(&exe, &state).unwrap();
+        assert_eq!(std::fs::read(&first).unwrap(), b"one");
+        assert_eq!(staged_binary(&exe, &state).unwrap(), first);
+        std::fs::write(&exe, b"two, longer").unwrap();
+        let second = staged_binary(&exe, &state).unwrap();
+        assert_ne!(second, first);
+        assert_eq!(std::fs::read(&second).unwrap(), b"two, longer");
+        // The stale copy is gone and no temp file is left behind.
+        let names: Vec<_> = std::fs::read_dir(&state).unwrap().flatten().map(|e| e.path()).collect();
+        assert_eq!(names, vec![second]);
+        assert!(staged_binary(&base.join("missing"), &state).is_err());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn roots_compare_through_links() {
+        let base = std::fs::canonicalize(std::env::temp_dir()).unwrap();
+        assert!(same_root(&base, &std::env::temp_dir()));
+        assert!(same_root(&base, &base.join(".")));
+        assert!(!same_root(&base, &base.join("herdr-bar-no-such-dir")));
     }
 }

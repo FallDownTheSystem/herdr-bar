@@ -7,9 +7,10 @@ description = "Cmd+K command bar with agent icons, fuzzy search, and optional au
 platforms = ["linux", "macos", "windows"]
 
 # The plugin is a Rust binary at bin/herdr-bar (bin/herdr-bar.exe on Windows).
-# On install and update, Herdr runs these steps in the plugin directory: they
-# download the release binary for this version and platform, check it against
-# the release's SHA256SUMS, and fall back to `cargo build --release`. Herdr
+# On install (updating is reinstalling), Herdr runs these steps in the plugin
+# directory: they download the release binary for this version and platform,
+# check it against the release's SHA256SUMS, and fall back to
+# `cargo build --release` (Rust 1.88+). Herdr
 # resolves a command path with a separator from the plugin directory. On
 # Windows the step also leaves an extensionless bin/herdr-bar copy, so the
 # shared commands below run there as written.

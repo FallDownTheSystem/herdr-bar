@@ -1,11 +1,11 @@
 #!/bin/sh
 # Put the herdr-bar binary at bin/herdr-bar for this checkout.
 #
-# Herdr runs this as the plugin's [[build]] step on `herdr plugin install` and
-# `herdr plugin update` (not on `plugin link`: run it yourself for a local
-# checkout). It downloads the prebuilt binary of the manifest's version from
+# Herdr runs this as the plugin's [[build]] step on `herdr plugin install`
+# (updating is reinstalling; `plugin link` never runs it: run it yourself for a
+# local checkout). It downloads the prebuilt binary of the manifest's version from
 # the GitHub release, checks it against the release's SHA256SUMS, and falls
-# back to `cargo build --release` when there is no binary for this machine or
+# back to `cargo build --release` (Rust 1.88+) when there is no binary for this machine or
 # the download or the check fails.
 #
 #   HERDR_BAR_BUILD=source     skip the download and build with cargo
@@ -48,9 +48,9 @@ asset_name() {
 
 fetch() { # url destination
     if command -v curl >/dev/null 2>&1; then
-        curl -fsSL --retry 2 --connect-timeout 15 -o "$2" "$1"
+        curl -fsSL --retry 2 --connect-timeout 15 --max-time 300 -o "$2" "$1"
     elif command -v wget >/dev/null 2>&1; then
-        wget -q -T 30 -O "$2" "$1"
+        wget -q -T 30 --tries=2 -O "$2" "$1"
     else
         say "neither curl nor wget is available"
         return 1
@@ -77,12 +77,42 @@ install_binary() { # source
     }
 }
 
+# Copy a verified download into bin/ and run it there rather than in $TMPDIR,
+# which may be mounted noexec; only a binary reporting the manifest version is
+# moved into place.
+install_checked() { # source
+    mkdir -p "$BIN_DIR" || return 1
+    tmpbin="$BIN_DIR/.herdr-bar.tmp.$$"
+    if ! cp "$1" "$tmpbin" || ! chmod 755 "$tmpbin"; then
+        rm -f "$tmpbin"
+        return 1
+    fi
+    reported=$("$tmpbin" --version 2>/dev/null) || {
+        rm -f "$tmpbin"
+        say "the downloaded $asset does not run on this machine"
+        return 1
+    }
+    if [ "$reported" != "herdr-bar $version" ]; then
+        rm -f "$tmpbin"
+        say "downloaded binary reports '$reported', expected 'herdr-bar $version'"
+        return 1
+    fi
+    mv -f "$tmpbin" "$TARGET" || {
+        rm -f "$tmpbin"
+        return 1
+    }
+}
+
 download() {
     asset=$(asset_name) || {
         say "no prebuilt binary for $(uname -s) $(uname -m)"
         return 1
     }
     base="${HERDR_BAR_DOWNLOAD_BASE:-$REPO_URL/releases/download/v$version}"
+    case "$base" in
+        https://* | file://*) ;;
+        *) say "warning: HERDR_BAR_DOWNLOAD_BASE is not https: $base" ;;
+    esac
     tmp=$(mktemp -d 2>/dev/null || mktemp -d -t herdr-bar) || return 1
     say "downloading $asset $version"
     ok=1
@@ -93,9 +123,7 @@ download() {
             say "SHA256SUMS has no entry for $asset"
         elif [ "$expected" != "$actual" ]; then
             say "checksum mismatch for $asset (expected $expected, got $actual)"
-        elif ! chmod 755 "$tmp/$asset" || ! "$tmp/$asset" --version >/dev/null 2>&1; then
-            say "the downloaded $asset does not run on this machine"
-        elif install_binary "$tmp/$asset"; then
+        elif install_checked "$tmp/$asset"; then
             ok=0
         fi
     else
@@ -107,13 +135,18 @@ download() {
 
 build_from_source() {
     if ! command -v cargo >/dev/null 2>&1; then
-        say "cargo is not installed"
+        say "cargo is not installed (building herdr-bar needs Rust 1.88 or newer)"
         return 1
     fi
     say "building from source with cargo"
     locked=
     [ -f Cargo.lock ] && locked=--locked
-    cargo build --release $locked && install_binary "$ROOT/target/release/herdr-bar"
+    # target/ is left in place: in a development clone it is the build cache.
+    if ! cargo build --release $locked; then
+        say "cargo build failed (herdr-bar needs Rust 1.88 or newer)"
+        return 1
+    fi
+    install_binary "$ROOT/target/release/herdr-bar"
 }
 
 if [ "${HERDR_BAR_BUILD:-}" != source ] && download; then
@@ -125,7 +158,7 @@ if build_from_source; then
     exit 0
 fi
 say "could not install herdr-bar $version: no prebuilt binary could be downloaded"
-say "and building from source failed. Install Rust (https://rustup.rs) and run"
-say "  sh scripts/install.sh"
-say "in $ROOT, or reinstall the plugin."
+say "and building from source failed. Install Rust 1.88 or newer"
+say "(https://rustup.rs), then reinstall the plugin:"
+say "  herdr plugin install jeffarese/herdr-bar"
 exit 1
