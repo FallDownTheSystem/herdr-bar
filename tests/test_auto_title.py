@@ -305,7 +305,7 @@ class AutoTitlesTest(unittest.TestCase):
                 self.apply()
                 self.assertEqual(len(self.client.calls), 2)
 
-    def test_sessionless_ownership_rejects_replacement_terminal(self):
+    def test_owned_name_follows_a_replacement_terminal(self):
         agent = self.client._snapshot["agents"][0]
         agent.pop("agent_session")
         agent["terminal_title_stripped"] = "First task"
@@ -313,9 +313,9 @@ class AutoTitlesTest(unittest.TestCase):
         self.client._snapshot["panes"][0]["terminal_id"] = "replacement"
         agent["terminal_title_stripped"] = "Different task"
         self.apply()
-        self.assertEqual(len(self.client.calls), 1)
+        self.assertEqual(self.client.calls[-1][-1], "Different task")
 
-    def test_session_id_arriving_later_keeps_ownership(self):
+    def test_owned_name_follows_later_and_replacement_sessions(self):
         agent = self.client._snapshot["agents"][0]
         session = agent.pop("agent_session")
         agent["terminal_title_stripped"] = "First task"
@@ -327,27 +327,31 @@ class AutoTitlesTest(unittest.TestCase):
         agent["agent_session"] = dict(session, value="aaaaaaaa-1234-1234-1234-123456789abc")
         agent["terminal_title_stripped"] = "Different session"
         self.apply()
-        self.assertEqual(len(self.client.calls), 2)
+        self.assertEqual(self.client.calls[-1][-1], "Different session")
 
-    def test_replacement_session_cannot_claim_a_previously_owned_name(self):
-        self.apply()
+    def test_restored_tab_keeps_following_its_task(self):
+        with tempfile.TemporaryDirectory() as root:
+            with patch.dict(os.environ, {"HERDR_PLUGIN_STATE_DIR": root}):
+                self.titles = AutoTitles()
+                with patch.object(TranscriptReader, "title", return_value="Initial task"):
+                    self.apply()
+                # A server restart restores the label but starts a new terminal,
+                # and the resumed agent reports a new session.
+                self.titles = AutoTitles()
+                self.client._snapshot["panes"][0]["terminal_id"] = "restored"
+                self.client._snapshot["agents"][0]["agent_session"]["value"] = (
+                    "aaaaaaaa-1234-1234-1234-123456789abc")
+                self.client._snapshot["agents"][0]["terminal_title_stripped"] = "Later task"
+                self.apply()
+                self.assertEqual(self.client.calls[-1][-1], "Later task")
+
+    def test_unowned_name_is_not_claimed_by_a_new_session(self):
+        self.client._snapshot["tabs"][0]["label"] = "Repair login"
         self.client._snapshot["agents"][0]["agent_session"]["value"] = (
             "aaaaaaaa-1234-1234-1234-123456789abc")
         self.title.return_value = "Different session"
         self.apply()
-        self.assertEqual(len(self.client.calls), 1)
-
-    def test_session_id_arriving_with_unchanged_title_blocks_later_replacement(self):
-        agent = self.client._snapshot["agents"][0]
-        session = agent.pop("agent_session")
-        agent["terminal_title_stripped"] = "First task"
-        self.apply()
-        agent["agent_session"] = session
-        self.apply()
-        agent["agent_session"] = dict(session, value="aaaaaaaa-1234-1234-1234-123456789abc")
-        agent["terminal_title_stripped"] = "Different session"
-        self.apply()
-        self.assertEqual(len(self.client.calls), 1)
+        self.assertEqual(self.client.calls, [])
 
     def test_existing_custom_names_are_preserved_on_first_open(self):
         for lowercase in (False, True):

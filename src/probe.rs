@@ -186,7 +186,6 @@ fn call(name: &str, args: &[Value]) -> Value {
             let mut out = Map::new();
             for (tab, c) in auto_title::candidates(a(0), owned) {
                 let mut map = Map::new();
-                map.insert("identity", c.identity);
                 map.insert("agent", Value::str(c.agent));
                 map.insert("suggested", Value::str(c.suggested));
                 map.insert("session", opt_string(&c.session));

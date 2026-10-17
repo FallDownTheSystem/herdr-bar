@@ -512,7 +512,6 @@ pub(crate) fn default_agent_name(name: &Value, kind: &Value, cwd: &str) -> bool 
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Candidate {
-    pub identity: Value,
     pub agent: String,
     pub suggested: String,
     pub session: Option<String>,
@@ -598,12 +597,10 @@ pub fn candidates(snapshot: &Value, owned: &Map) -> Vec<(String, Candidate)> {
             }
         } else if suggested.is_empty() || pane.get("terminal_id").as_str().is_none_or(|t| t.is_empty()) {
             // Terminal titles are available even when Herdr has no session ID.
-            // Only transcripts need that ID; terminal identity still prevents
-            // a replacement pane from claiming a name we previously wrote.
+            // Only transcripts need that ID; the terminal ID lets the check
+            // before a rename notice that the pane was replaced meanwhile.
             continue;
         }
-        let session_value = session_id.clone().map(Value::str).unwrap_or(Value::Null);
-        let identity = Value::List(vec![kind.clone(), session_value, agent.get("pane_id").clone(), pane.get("terminal_id").clone()]);
         let Some(tab_id) = tab.get("tab_id").as_str() else { continue };
         let previous = match owned.get(tab_id) {
             Some(previous @ Value::Dict(_)) => previous,
@@ -614,17 +611,14 @@ pub fn candidates(snapshot: &Value, owned: &Map) -> Vec<(String, Candidate)> {
         }
         let label = tab.get("label");
         let unnamed = label.is_null() || label.as_str() == Some("") || label.as_str() == Some(position.to_string().as_str());
-        if !unnamed {
-            let old_identity = previous.get("identity");
-            // Hooks may report the session ID after the first terminal title.
-            let earlier = Value::List(vec![kind.clone(), Value::Null, agent.get("pane_id").clone(), pane.get("terminal_id").clone()]);
-            let identified_later = session_id.is_some() && py_eq(old_identity, &earlier);
-            if (!py_eq(old_identity, &identity) && !identified_later) || !py_eq(previous.get("title"), label) {
-                continue;
-            }
+        // A name stays ours while it still reads as we wrote it, whoever runs
+        // in the tab now: Herdr restores a tab with a new terminal and resumed
+        // agents can report a new session, and the user expects the title to
+        // keep following the task. A manual rename yields the tab for good.
+        if !unnamed && !py_eq(previous.get("title"), label) {
+            continue;
         }
         let candidate = Candidate {
-            identity,
             agent: kind_text.to_string(),
             suggested,
             session: session_id,
@@ -754,14 +748,9 @@ impl AutoTitles {
             let title_value = Value::str(title.clone());
             let record = || {
                 let mut record = Map::new();
-                record.insert("identity", candidate.identity.clone());
                 record.insert("title", Value::str(title.clone()));
                 Value::Dict(record)
             };
-            if py_eq(&title_value, &candidate.label) && self.owned.contains_key(&tab_id) {
-                // Bind a newly reported session even when its title is unchanged.
-                self.owned.insert(tab_id.clone(), record());
-            }
             if title.is_empty() || py_eq(&title_value, &candidate.label) {
                 continue;
             }

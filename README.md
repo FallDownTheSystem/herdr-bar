@@ -132,8 +132,10 @@ useful terminal title yet. No extra model requests are made.
   by this plugin are updated. Manually changing a name opts that tab out for
   the rest of its lifetime. Tabs with multiple agents are left alone.
 - **Updates survive reopening.** Ownership is saved in the plugin state
-  directory, tied to the agent session and terminal. Old custom names are not
-  adopted just because they match a suggested title.
+  directory, per tab, with the name the plugin wrote. While the tab still has
+  that name, it keeps following its agent, also after Herdr restores the tab
+  with a new terminal or the agent starts a new session. Old custom names are
+  not adopted just because they match a suggested title.
 - **Starts when enabled.** Herdr's startup and agent-detection hooks start a
   single background watcher per server. Opening the bar also ensures it is running. After
   linking or enabling the plugin in an already running server, start it with

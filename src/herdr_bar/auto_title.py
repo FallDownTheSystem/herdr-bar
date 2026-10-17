@@ -239,25 +239,23 @@ def _candidates(
         elif not (suggested and isinstance(pane.get("terminal_id"), str)
                   and pane["terminal_id"]):
             # Terminal titles are available even when Herdr has no session ID.
-            # Only transcripts need that ID; terminal identity still prevents
-            # a replacement pane from claiming a name we previously wrote.
+            # Only transcripts need that ID; the terminal ID lets the check
+            # before a rename notice that the pane was replaced meanwhile.
             continue
-        identity = [kind, session_id, agent.get("pane_id"), pane.get("terminal_id")]
         previous = owned.get(tab["tab_id"], {})
         if not isinstance(previous, dict):
             previous = {}
         if previous.get("yielded"):
             continue
-        if tab.get("label") not in (None, "", str(positions[workspace])):
-            old_identity = previous.get("identity")
-            # Hooks may report the session ID after the first terminal title.
-            identified_later = (session_id is not None and old_identity ==
-                                [kind, None, agent.get("pane_id"), pane.get("terminal_id")])
-            if ((old_identity != identity and not identified_later)
-                    or previous.get("title") != tab.get("label")):
-                continue
+        # A name stays ours while it still reads as we wrote it, whoever runs
+        # in the tab now: Herdr restores a tab with a new terminal and resumed
+        # agents can report a new session, and the user expects the title to
+        # keep following the task. A manual rename yields the tab for good.
+        if (tab.get("label") not in (None, "", str(positions[workspace]))
+                and previous.get("title") != tab.get("label")):
+            continue
         candidates[tab["tab_id"]] = {
-            "identity": identity, "agent": kind,
+            "agent": kind,
             "suggested": suggested,
             "session": session_id, "pane": agent.get("pane_id"),
             "terminal": pane.get("terminal_id"), "label": tab.get("label"),
@@ -336,9 +334,6 @@ class AutoTitles:
                 title = self.reader.title(candidate["session"], candidate["cwd"])
             if self.lowercase_titles:
                 title = title.lower()
-            if title == candidate["label"] and tab_id in self.owned:
-                # Bind a newly reported session even when its title is unchanged.
-                self.owned[tab_id] = {"identity": candidate["identity"], "title": title}
             if not title or title == candidate["label"]:
                 continue
             try:
@@ -350,7 +345,7 @@ class AutoTitles:
                 if staging is not None:
                     staging.write_text(json.dumps(self.owned))
                 client.rename_tab(tab_id, title)
-                self.owned[tab_id] = {"identity": candidate["identity"], "title": title}
+                self.owned[tab_id] = {"title": title}
             except HerdrError:
                 continue  # Optional naming must never prevent opening the bar.
             for tab in snapshot.get("tabs", []):

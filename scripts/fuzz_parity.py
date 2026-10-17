@@ -863,12 +863,6 @@ def owned(rng: random.Random) -> Dict[str, Any]:
                 rng,
                 {
                     "yielded": maybe(rng, rng.random() < 0.2),
-                    "identity": pick(
-                        rng,
-                        ["claude", None, "p1", "term-1"],
-                        ["claude", uuid(rng), "p1", "term-1"],
-                        None,
-                    ),
                     "title": pick(rng, "build", "1", None, "Fix the bug"),
                 },
             )
