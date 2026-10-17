@@ -1,6 +1,6 @@
 [package]
 name = "herdr-bar"
-version = "0.8.0"
+version = "0.9.0"
 edition = "2021"
 description = "Cmd+K command bar for Herdr with agent icons, fuzzy search, and automatic tab titles"
 license = "MIT"

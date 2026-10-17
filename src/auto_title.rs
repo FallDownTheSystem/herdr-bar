@@ -596,7 +596,7 @@ pub fn candidates(snapshot: &Value, owned: &Map) -> Vec<(String, Candidate)> {
                 Some(value) if is_session_id(value) => session_id = Some(value.to_string()),
                 _ => continue,
             }
-        } else if !(!suggested.is_empty() && pane.get("terminal_id").as_str().map(|t| !t.is_empty()).unwrap_or(false)) {
+        } else if suggested.is_empty() || pane.get("terminal_id").as_str().is_none_or(|t| t.is_empty()) {
             // Terminal titles are available even when Herdr has no session ID.
             // Only transcripts need that ID; terminal identity still prevents
             // a replacement pane from claiming a name we previously wrote.

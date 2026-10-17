@@ -28,6 +28,7 @@ import difflib
 import hashlib
 import json
 import os
+import re
 import shutil
 import socket
 import stat
@@ -768,9 +769,19 @@ def run_scenarios(cmd: Sequence[str], only: Optional[str]) -> Dict[str, Any]:
     return results
 
 
+# Each scenario gets a fresh mkdtemp directory, so its random suffix can show
+# up in printed errors. Mask it before comparing.
+TMP_NAME = re.compile(r"hbp-[A-Za-z0-9_]{8}")
+
+
+def dump(value: Any) -> List[str]:
+    text = json.dumps(value, indent=1, ensure_ascii=False, sort_keys=True)
+    return TMP_NAME.sub("hbp-XXXXXXXX", text).splitlines()
+
+
 def diff(name: str, left: Any, right: Any) -> List[str]:
-    a = json.dumps(left, indent=1, ensure_ascii=False, sort_keys=True).splitlines()
-    b = json.dumps(right, indent=1, ensure_ascii=False, sort_keys=True).splitlines()
+    a = dump(left)
+    b = dump(right)
     return list(difflib.unified_diff(a, b, "python:" + name, "rust:" + name, lineterm="", n=2))
 
 
