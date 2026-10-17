@@ -107,6 +107,9 @@ jobs:
           toolchain: 1.99.1
           targets: ${{ matrix.target }}
       - name: Build
+        # bash on every runner: Windows defaults to PowerShell, where "$TARGET"
+        # is an empty PowerShell variable rather than the environment variable.
+        shell: bash
         env:
           TARGET: ${{ matrix.target }}
         run: cargo build --release --locked --target "$TARGET"
